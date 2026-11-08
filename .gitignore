@@ -1,0 +1,43 @@
+# AI Agent teamwork artifacts
+.agents/
+
+# Local specifications and test reports
+docs/spec/
+docs/test_report/
+
+# Dependencies
+node_modules/
+.pnpm-store/
+
+# Production
+dist/
+dist-ssr/
+
+# Logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Environment
+.env
+.env.*
+!.env.example
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# TypeScript build info cache
+*.tsbuildinfo
+
+# Test reports and artifacts
+playwright-report/
+test-results/
