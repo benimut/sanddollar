@@ -172,5 +172,81 @@ export type TransactionEditTarget =
   | { type: 'income'; data: IncomeRecord }
   | { type: 'reward'; data: MonthlyReward };
 
+/**
+ * 收入來源表記錄介面 (IndexedDB incomeSources 表資料結構)
+ */
+export interface IncomeSourceRecord {
+  /** 本地資料庫主鍵，自動遞增識別碼 (選填，新增時由 IndexedDB 自動產生) */
+  id?: number;
+  /** 收入來源名稱 (例如：「公司薪資」、「兼職接案」) */
+  name: string;
+  /** 是否為系統內建預設收入來源 */
+  isDefault?: boolean;
+}
 
+/**
+ * 回饋來源表記錄介面 (IndexedDB rewardSources 表資料結構)
+ */
+export interface RewardSourceRecord {
+  /** 本地資料庫主鍵，自動遞增識別碼 (選填，新增時由 IndexedDB 自動產生) */
+  id?: number;
+  /** 回饋來源名稱 (例如：「玉山 Pi 拍錢包回饋」、「LINE POINTS」) */
+  name: string;
+  /** 是否為系統內建預設回饋來源 */
+  isDefault?: boolean;
+}
+
+/**
+ * 備份資料酬載介面
+ */
+export interface BackupDataPayload {
+  /** 備份資料格式版本號 (目前固定為 1) */
+  version: number;
+  /** 匯出時間戳記 (ISO 8601 格式字串，例如：2026-11-06T12:00:00.000Z) */
+  exportedAt: string;
+  /** 資料表記錄內容集合物件 */
+  data: {
+    /** 支出記錄陣列 */
+    expenses: ExpenseRecord[];
+    /** 收入記錄陣列 */
+    incomes: IncomeRecord[];
+    /** 每月回饋記錄陣列 */
+    rewards: MonthlyReward[];
+    /** 分類記錄陣列 */
+    categories: CategoryRecord[];
+    /** 支付方式記錄陣列 */
+    paymentMethods?: PaymentMethodRecord[];
+    /** 收入來源記錄陣列 */
+    incomeSources?: IncomeSourceRecord[];
+    /** 回饋來源記錄陣列 */
+    rewardSources?: RewardSourceRecord[];
+  };
+}
+
+/**
+ * 匯入結果統計資訊介面
+ */
+export interface ImportBackupResult {
+  /** 是否匯入成功 */
+  success: boolean;
+  /** 各資料表成功匯入的筆數統計物件 */
+  importedCount: {
+    /** 匯入之支出記錄筆數 */
+    expenses: number;
+    /** 匯入之收入記錄筆數 */
+    incomes: number;
+    /** 匯入之每月回饋記錄筆數 */
+    rewards: number;
+    /** 匯入之分類記錄筆數 */
+    categories: number;
+    /** 匯入之支付方式記錄筆數 */
+    paymentMethods: number;
+    /** 匯入之收入來源記錄筆數 */
+    incomeSources?: number;
+    /** 匯入之回饋來源記錄筆數 */
+    rewardSources?: number;
+  };
+  /** 錯誤訊息字串 (若失敗時提供具體失敗原因) */
+  error?: string;
+}
 

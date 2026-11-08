@@ -30,6 +30,10 @@ vi.mock('@/db', async (importOriginal) => {
     updateIncome: vi.fn().mockResolvedValue(1),
     addReward: vi.fn().mockResolvedValue(1),
     updateReward: vi.fn().mockResolvedValue(1),
+    addIncomeSource: vi.fn().mockResolvedValue(1),
+    addRewardSource: vi.fn().mockResolvedValue(1),
+    getPaymentMethods: vi.fn().mockResolvedValue([]),
+    addPaymentMethod: vi.fn().mockResolvedValue(1),
     getDistinctIncomeSources: vi.fn().mockResolvedValue(['公司薪資', '股票股利', '發票中獎']),
     getDistinctMerchants: vi.fn().mockResolvedValue(['全家便利商店', '7-ELEVEN', '星巴克']),
     getItemsByMerchant: vi.fn().mockResolvedValue([
@@ -94,6 +98,8 @@ describe('Milestone 5: TransactionForm 模組化拆分與歷史選單單元測�
       '股票股利',
       '發票中獎',
     ]);
+    vi.mocked(dbModule.getPaymentMethods).mockResolvedValue([]);
+    vi.mocked(dbModule.addPaymentMethod).mockResolvedValue(1);
   });
 
   afterEach(() => {
@@ -372,10 +378,11 @@ describe('Milestone 5: TransactionForm 模組化拆分與歷史選單單元測�
         submitBtn.click();
         await flushAsync();
 
-        // 5. 驗證 addIncome 接收之 source 為「接案外包」
+        // 5. 驗證 addIncome 接收之 source 為「接案外包」且呼叫 addIncomeSource
         expect(dbModule.addIncome).toHaveBeenCalled();
         const callArg = vi.mocked(dbModule.addIncome).mock.calls[0][0];
         expect(callArg.source, '新增自訂來源時應正確寫入 source: "接案外包"').toBe('接案外包');
+        expect(dbModule.addIncomeSource).toHaveBeenCalledWith('接案外包');
       } finally {
         cleanup();
       }
@@ -1127,8 +1134,8 @@ describe('Milestone 5: TransactionForm 模組化拆分與歷史選單單元測�
       });
     });
 
-    describe('8.2 規格 v2.0: 商品分類與支付方式選單無空白選項，預設清單首項', () => {
-      it('商品分類選單與支付方式選單完全不包含空白選項 <option value="">，預設選中清單第 1 項', async () => {
+    describe('8.2 規格 v2.0: 支付方式純淨模式與動態呈現規格 (純淨無預載、無既有資料佔位、已有資料預選首項與 Fallback 持久化)', () => {
+      it('商品分類選單完全不包含空白選項 <option value="">，預設選中清單第 1 項，追加品項亦同', async () => {
         const { container, cleanup } = mountComponent(ExpenseForm);
         await flushAsync();
 
@@ -1144,18 +1151,7 @@ describe('Milestone 5: TransactionForm 模組化拆分與歷史選單單元測�
           // 預設為既有分類清單第 1 項（如「餐飲」）
           expect(catSelect0!.value, '商品分類選單預設值應為既有清單第 1 項').toBe('餐飲');
 
-          // 2. 驗證支付方式選單 #payment-method
-          const paySelect = container.querySelector('#payment-method') as HTMLSelectElement | null;
-          expect(paySelect, '應存在支付方式選單 #payment-method').not.toBeNull();
-
-          const payOptions = Array.from(paySelect!.querySelectorAll('option'));
-          const emptyPayOption = payOptions.find((opt) => opt.value === '');
-          expect(emptyPayOption, '支付方式選單完全不應包含空白選項 <option value="">').toBeUndefined();
-
-          // 預設為既有支付方式清單第 1 項（如「現金」）
-          expect(paySelect!.value, '支付方式選單預設值應為既有清單第 1 項').toBe('現金');
-
-          // 3. 點擊「+ 新增商品」按鈕，驗證新追加的項目列亦無空白選項且預設首項
+          // 2. 點擊「+ 新增商品」按鈕，驗證新追加的項目列亦無空白選項且預設首項
           const addItemBtn = (container.querySelector('#btn-add-item') ||
             Array.from(container.querySelectorAll('button')).find((b) =>
               b.textContent?.includes('新增商品')
@@ -1171,6 +1167,173 @@ describe('Milestone 5: TransactionForm 模組化拆分與歷史選單單元測�
           const emptyCat1Option = cat1Options.find((opt) => opt.value === '');
           expect(emptyCat1Option, '新增品項之分類選單亦不得包含空白選項 <option value="">').toBeUndefined();
           expect(catSelect1!.value, '新增品項之分類預設值應為既有清單第 1 項').toBe('餐飲');
+        } finally {
+          cleanup();
+        }
+      });
+
+      it('規格 1【純淨無預設】：DEFAULT_PAYMENT_METHODS 為空陣列，資料庫預設無支付方式記錄', () => {
+        expect(dbModule.DEFAULT_PAYMENT_METHODS, 'DEFAULT_PAYMENT_METHODS 必須為空陣列').toEqual([]);
+      });
+
+      it('規格 2【無既有資料呈現】：當資料庫無任何支付方式記錄（設定表為空）時，#payment-method 選單應自動預選為 "__add_new__"，且自動展開自訂支付方式輸入框，不應包含 value="" 的佔位選項', async () => {
+        vi.mocked(dbModule.getPaymentMethods).mockResolvedValue([]);
+
+        const { container, cleanup } = mountComponent(ExpenseForm);
+        await flushAsync();
+
+        try {
+          const paySelect = container.querySelector('#payment-method') as HTMLSelectElement | null;
+          expect(paySelect, '應存在支付方式選單 #payment-method').not.toBeNull();
+
+          const payOptions = Array.from(paySelect!.querySelectorAll('option'));
+          const placeholderOption = payOptions.find((opt) => opt.value === '');
+          expect(placeholderOption, '無既有資料時，選單不應包含 value="" 的佔位選項').toBeUndefined();
+
+          const addNewOption = payOptions.find((opt) => opt.value === '__add_new__');
+          expect(addNewOption, '選單末尾必須具備 value="__add_new__" 的新增選項').toBeDefined();
+          expect(addNewOption?.textContent?.trim()).toContain('新增支付方式');
+
+          // 選單應自動預選為 '__add_new__'
+          expect(paySelect!.value, '無既有資料時，支付方式選單應自動預選為 "__add_new__"').toBe('__add_new__');
+
+          // 自動展開自訂支付方式輸入框
+          const customPaymentInput = container.querySelector('#custom-payment-input') as HTMLInputElement | null;
+          expect(customPaymentInput, '無既有資料時，應自動展開自訂支付方式輸入框 (#custom-payment-input)').not.toBeNull();
+        } finally {
+          cleanup();
+        }
+      });
+
+      it('規格 3【已有既有資料呈現】：當資料庫存在既有自訂支付方式時，#payment-method 選單不包含空白選項，並自動預選清單第 1 項', async () => {
+        vi.mocked(dbModule.getPaymentMethods).mockResolvedValue(['信用卡', '悠遊卡']);
+
+        const { container, cleanup } = mountComponent(ExpenseForm);
+        await flushAsync();
+
+        try {
+          const paySelect = container.querySelector('#payment-method') as HTMLSelectElement | null;
+          expect(paySelect, '應存在支付方式選單 #payment-method').not.toBeNull();
+
+          const payOptions = Array.from(paySelect!.querySelectorAll('option'));
+          const emptyPayOption = payOptions.find((opt) => opt.value === '');
+          expect(emptyPayOption, '存在自訂支付方式時，選單不應包含空白選項 <option value="">').toBeUndefined();
+
+          // 自動預選清單第 1 項
+          expect(paySelect!.value, '存在自訂支付方式時，應自動預選既有清單第 1 項').toBe('信用卡');
+
+          const addNewOption = payOptions.find((opt) => opt.value === '__add_new__');
+          expect(addNewOption, '選單末尾仍應提供「+ 新增支付方式...」').toBeDefined();
+        } finally {
+          cleanup();
+        }
+      });
+
+      it('規格 4【未填直接儲存之 Fallback 與自動持久化】：當選項處於新增狀態且未填自訂名稱直接儲存時，送出之支出記錄 paymentMethod 安全 fallback 為「現金」，且同時將「現金」新增至 IndexedDB paymentMethods 資料表', async () => {
+        vi.mocked(dbModule.getPaymentMethods).mockResolvedValue([]);
+
+        const { container, cleanup } = mountComponent(ExpenseForm);
+        await flushAsync();
+
+        try {
+          const paySelect = container.querySelector('#payment-method') as HTMLSelectElement | null;
+          expect(paySelect, '應存在支付方式選單 #payment-method').not.toBeNull();
+          expect(paySelect!.value, '無支付方式記錄時自動處於 __add_new__ 狀態').toBe('__add_new__');
+
+          // 輸入店家名稱、品項名稱與單價，但自訂支付方式輸入框未填寫任何名稱
+          const merchantInput = container.querySelector('#merchant-input') as HTMLInputElement;
+          merchantInput.value = '純淨支付測試店家';
+          merchantInput.dispatchEvent(new Event('input'));
+
+          const nameInput = (container.querySelector('#expense-name') ||
+            container.querySelector('input[placeholder*="品名"]')) as HTMLInputElement;
+          nameInput.value = '測試商品';
+          nameInput.dispatchEvent(new Event('input'));
+
+          const priceInput = (container.querySelector('#expense-amount') ||
+            container.querySelector('input[placeholder*="單價"]')) as HTMLInputElement;
+          priceInput.value = '150';
+          priceInput.dispatchEvent(new Event('input'));
+          await flushAsync();
+
+          const submitBtn = (container.querySelector('#btn-submit-expense') ||
+            Array.from(container.querySelectorAll('button')).find((b) =>
+              b.textContent?.includes('儲存')
+            )) as HTMLButtonElement;
+          expect(submitBtn, '應存在儲存按鈕').not.toBeNull();
+          submitBtn.click();
+          await flushAsync();
+
+          // 驗證 addExpense 寫入記錄
+          expect(dbModule.addExpense, '應成功調用 addExpense').toHaveBeenCalled();
+          const savedExpense = vi.mocked(dbModule.addExpense).mock.calls[0][0];
+          expect(
+            savedExpense.paymentMethod,
+            '未填自訂名稱直接儲存時，expense 記錄中 paymentMethod 必須 fallback 為「現金」'
+          ).toBe('現金');
+
+          // 驗證自動持久化至 paymentMethods 資料表
+          expect(
+            dbModule.addPaymentMethod,
+            '必須同時將「現金」寫入 IndexedDB paymentMethods 資料表'
+          ).toHaveBeenCalledWith('現金');
+        } finally {
+          cleanup();
+        }
+      });
+
+      it('規格 4 延伸【選取新增但未填名稱直接儲存】：paymentMethod 亦 fallback 為「現金」且自動持久化至資料庫', async () => {
+        vi.mocked(dbModule.getPaymentMethods).mockResolvedValue([]);
+
+        const { container, cleanup } = mountComponent(ExpenseForm);
+        await flushAsync();
+
+        try {
+          const paySelect = container.querySelector('#payment-method') as HTMLSelectElement | null;
+          expect(paySelect, '應存在支付方式選單 #payment-method').not.toBeNull();
+
+          // 選取「+ 新增支付方式...」
+          paySelect!.value = '__add_new__';
+          paySelect!.dispatchEvent(new Event('change'));
+          await flushAsync();
+
+          // 輸入店家名稱、品項名稱與單價，但不填寫自訂支付方式名稱
+          const merchantInput = container.querySelector('#merchant-input') as HTMLInputElement;
+          merchantInput.value = '自訂未填測試店家';
+          merchantInput.dispatchEvent(new Event('input'));
+
+          const nameInput = (container.querySelector('#expense-name') ||
+            container.querySelector('input[placeholder*="品名"]')) as HTMLInputElement;
+          nameInput.value = '自訂未填品項';
+          nameInput.dispatchEvent(new Event('input'));
+
+          const priceInput = (container.querySelector('#expense-amount') ||
+            container.querySelector('input[placeholder*="單價"]')) as HTMLInputElement;
+          priceInput.value = '80';
+          priceInput.dispatchEvent(new Event('input'));
+          await flushAsync();
+
+          const submitBtn = (container.querySelector('#btn-submit-expense') ||
+            Array.from(container.querySelectorAll('button')).find((b) =>
+              b.textContent?.includes('儲存')
+            )) as HTMLButtonElement;
+          expect(submitBtn, '應存在儲存按鈕').not.toBeNull();
+          submitBtn.click();
+          await flushAsync();
+
+          // 驗證 addExpense 寫入記錄中 fallback 為「現金」
+          expect(dbModule.addExpense, '應成功調用 addExpense').toHaveBeenCalled();
+          const savedExpense = vi.mocked(dbModule.addExpense).mock.calls[0][0];
+          expect(
+            savedExpense.paymentMethod,
+            '選取 __add_new__ 但未填名稱直接送出時，paymentMethod 必須 fallback 為「現金」'
+          ).toBe('現金');
+
+          // 驗證自動持久化至 paymentMethods 資料表
+          expect(
+            dbModule.addPaymentMethod,
+            '必須同時將「現金」寫入 IndexedDB paymentMethods 資料表'
+          ).toHaveBeenCalledWith('現金');
         } finally {
           cleanup();
         }
@@ -1452,11 +1615,12 @@ describe('Milestone 5: TransactionForm 模組化拆分與歷史選單單元測�
         submitBtn.click();
         await flushAsync();
 
-        // 5. 驗證 addReward 寫入記錄
+        // 5. 驗證 addReward 寫入記錄且呼叫 addRewardSource
         expect(dbModule.addReward).toHaveBeenCalled();
         const callArg = vi.mocked(dbModule.addReward).mock.calls[0][0];
         expect(callArg.sourceName, '新增自訂回饋來源時應正確寫入 sourceName: "街口聯名卡回饋"').toBe('街口聯名卡回饋');
         expect(callArg.amount).toBe(450);
+        expect(dbModule.addRewardSource).toHaveBeenCalledWith('街口聯名卡回饋');
       } finally {
         cleanup();
       }

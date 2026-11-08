@@ -13,7 +13,7 @@
  * 7. 電子發票掃描整合與本地 IndexedDB 資料持久化。
  */
 
-import { ref, computed, onMounted, watch } from 'vue';
+import { ref, computed, onMounted, watch, nextTick } from 'vue';
 import {
   addExpense,
   updateExpense,
@@ -51,9 +51,10 @@ const isForeignExpense = ref(false);
 // ==================== 基礎資料狀態 ====================
 const expenseDate = ref(getTodayDateString());
 const merchant = ref('');
-const paymentMethod = ref(DEFAULT_PAYMENT_METHODS[0] || '現金');
+const paymentMethod = ref(DEFAULT_PAYMENT_METHODS[0] || '');
 const customPaymentName = ref('');
 const isAddingPayment = ref(false);
+const paymentSelectRef = ref<HTMLSelectElement | null>(null);
 
 // 店家全螢幕挑選彈窗狀態
 const isMerchantModalOpen = ref(false);
@@ -80,8 +81,32 @@ const {
   },
 });
 
-/** 可用支付方式清單（預設常用清單，可從資料庫載入自訂項目） */
+/** 可用支付方式清單（純淨模式預設為空陣列，從資料庫載入自訂項目） */
 const paymentMethodList = ref<string[]>([...DEFAULT_PAYMENT_METHODS]);
+
+/**
+ * 支付方式選單動態選項介面
+ */
+interface PaymentOptionItem {
+  value: string;
+  label: string;
+}
+
+/**
+ * 支付方式選單動態選項清單
+ * 無既有資料時僅提供「+ 新增支付方式...」，有資料時包含既有清單與末尾「+ 新增支付方式...」
+ */
+const displayPaymentOptions = computed<PaymentOptionItem[]>(() => {
+  if (paymentMethodList.value.length === 0) {
+    return [
+      { value: '__add_new__', label: '+ 新增支付方式...' },
+    ];
+  }
+  return [
+    ...paymentMethodList.value.map((pm) => ({ value: pm, label: pm })),
+    { value: '__add_new__', label: '+ 新增支付方式...' },
+  ];
+});
 
 /** 備註說明輸入字串 */
 const expenseNote = ref('');
@@ -196,7 +221,8 @@ watch(
     if (data) {
       expenseDate.value = data.date || getTodayDateString();
       merchant.value = data.merchant || '';
-      paymentMethod.value = data.paymentMethod || '現金';
+      paymentMethod.value = data.paymentMethod || (paymentMethodList.value.length > 0 ? paymentMethodList.value[0] : '__add_new__');
+      isAddingPayment.value = paymentMethod.value === '__add_new__';
       expenseNote.value = data.note || '';
       isForeignExpense.value = !!data.isForeign;
       foreignExpenseCurrency.value = data.currency || 'USD';
@@ -257,20 +283,32 @@ const totalExpenseAmount = computed(() => {
 
 /**
  * 載入資料庫中既有之支付方式清單
- * 純淨無預設：空資料庫時保持為空陣列
+ * 純淨無預設：空資料庫時保持為空陣列，並自動切換為新增支付方式狀態
  */
 async function loadPaymentMethodsList() {
   try {
     const list = await getPaymentMethods();
     const merged = new Set<string>([...DEFAULT_PAYMENT_METHODS, ...(Array.isArray(list) ? list : [])]);
     paymentMethodList.value = Array.from(merged);
-    if (!paymentMethod.value) {
-      paymentMethod.value = paymentMethodList.value[0] || '現金';
+    if (paymentMethodList.value.length === 0) {
+      paymentMethod.value = '__add_new__';
+      isAddingPayment.value = true;
+    } else {
+      if (!isEditMode.value || !paymentMethod.value || !paymentMethodList.value.includes(paymentMethod.value)) {
+        paymentMethod.value = paymentMethodList.value[0];
+        isAddingPayment.value = false;
+      }
     }
   } catch {
     paymentMethodList.value = [...DEFAULT_PAYMENT_METHODS];
-    if (!paymentMethod.value) {
-      paymentMethod.value = '現金';
+    if (paymentMethodList.value.length === 0) {
+      paymentMethod.value = '__add_new__';
+      isAddingPayment.value = true;
+    } else {
+      if (!isEditMode.value || !paymentMethod.value || !paymentMethodList.value.includes(paymentMethod.value)) {
+        paymentMethod.value = paymentMethodList.value[0];
+        isAddingPayment.value = false;
+      }
     }
   }
 }
@@ -297,8 +335,9 @@ onMounted(async () => {
   if (expenseCategoryList.value.length > 0 && items.value.length > 0 && !items.value[0].category) {
     items.value[0].category = expenseCategoryList.value[0];
   }
-  if (paymentMethodList.value.length > 0 && !paymentMethod.value) {
-    paymentMethod.value = paymentMethodList.value[0];
+  await nextTick();
+  if (paymentSelectRef.value && paymentMethod.value) {
+    paymentSelectRef.value.value = paymentMethod.value;
   }
 });
 
@@ -470,9 +509,14 @@ function resetForm() {
   showAddCategory.value = false;
   newCategoryName.value = '';
   categoryTargetItemIndex.value = null;
-  isAddingPayment.value = false;
   customPaymentName.value = '';
-  paymentMethod.value = paymentMethodList.value[0] || '現金';
+  if (paymentMethodList.value.length === 0) {
+    paymentMethod.value = '__add_new__';
+    isAddingPayment.value = true;
+  } else {
+    paymentMethod.value = paymentMethodList.value[0];
+    isAddingPayment.value = false;
+  }
 }
 
 /**
@@ -500,18 +544,26 @@ async function handleSaveExpense() {
 
   // 處理自訂支付方式建立或未填 fallback「現金」
   let finalPaymentMethod = paymentMethod.value?.trim() || '';
-  if (isAddingPayment.value || !finalPaymentMethod || finalPaymentMethod === '__add_new__') {
+  const isAddingState = isAddingPayment.value || finalPaymentMethod === '__add_new__' || !finalPaymentMethod;
+  if (isAddingState) {
     const cleanPay = customPaymentName.value.trim();
     if (cleanPay) {
+      finalPaymentMethod = cleanPay;
       try {
         await addPaymentMethod(cleanPay);
-        finalPaymentMethod = cleanPay;
       } catch {
-        finalPaymentMethod = cleanPay;
+        // 忽略已存在或重複錯誤
       }
     } else {
       finalPaymentMethod = '現金';
+      try {
+        await addPaymentMethod('現金');
+      } catch {
+        // 若「現金」已存在於資料表，安全忽略重複錯誤
+      }
     }
+  } else {
+    finalPaymentMethod = paymentMethod.value;
   }
 
   const expenseItems: ExpenseItem[] = [];
@@ -886,13 +938,19 @@ async function handleSaveExpense() {
         <label for="payment-method" class="block text-xs font-medium text-slate-500 mb-1">支付方式</label>
         <select
           id="payment-method"
+          ref="paymentSelectRef"
           v-model="paymentMethod"
           name="expense-payment-method"
           class="w-full text-sm border border-slate-200 rounded-lg p-2 focus:ring-2 focus:ring-teal-500 focus:outline-none"
           @change="handlePaymentChange"
         >
-          <option v-for="pm in paymentMethodList" :key="pm" :value="pm">{{ pm }}</option>
-          <option value="__add_new__">+ 新增支付方式...</option>
+          <option
+            v-for="opt in displayPaymentOptions"
+            :key="opt.value"
+            :value="opt.value"
+          >
+            {{ opt.label }}
+          </option>
         </select>
 
         <!-- 自訂支付方式輸入框 (出現在支付方式下方) -->

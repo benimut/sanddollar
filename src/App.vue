@@ -5,7 +5,7 @@
  *
  * 核心業務職責：
  * 1. 頂層版面配置 (Layout)：固定頂部 AppBar 標題區 (Sand Dollar) 與底部 NavigationBar 導覽列。
- * 2. 全域視圖導航切換：管理 currentTab 狀態（'list' 明細、'transaction' 記帳、'report' 報表、'backup' 備份），動態切換各主視圖元件。
+ * 2. 全域視圖導航切換：管理 currentTab 狀態（'list' 明細、'transaction' 記帳、'report' 報表、'settings' 設定），動態切換各主視圖元件。
  * 3. 響應式與無障礙支援：具備 role="navigation" 與 aria-selected 標記，提供流暢之行動端 PWA 使用體驗。
  */
 
@@ -13,11 +13,11 @@ import { ref } from 'vue';
 import TransactionList from './components/TransactionList.vue';
 import TransactionForm from './components/TransactionForm.vue';
 import ReportView from './components/ReportView.vue';
-import BackupView from './components/BackupView.vue';
+import SettingsView from './components/SettingsView.vue';
 import type { TransactionEditTarget } from './types';
 
-/** 目前選取的分頁視圖：'list' 為明細、'transaction' 為記帳、'report' 為報表、'backup' 為備份 */
-const currentTab = ref<'list' | 'transaction' | 'report' | 'backup'>('transaction');
+/** 目前選取的分頁視圖：'list' 為明細、'transaction' 為記帳、'report' 為報表、'settings' 為設定 */
+const currentTab = ref<'list' | 'transaction' | 'report' | 'settings'>('transaction');
 
 /** 當前正在編輯的記錄（若無則為 null 處於新增模式） */
 const editingTransaction = ref<TransactionEditTarget | null>(null);
@@ -68,7 +68,7 @@ function handleTransactionCancel() {
         @cancel="handleTransactionCancel"
       />
       <ReportView v-else-if="currentTab === 'report'" />
-      <BackupView v-else-if="currentTab === 'backup'" />
+      <SettingsView v-else-if="currentTab === 'settings'" />
     </main>
 
     <!-- 底部導覽列 -->
@@ -117,17 +117,17 @@ function handleTransactionCancel() {
           <span class="text-xs mt-0.5">報表</span>
         </button>
 
-        <!-- 備份分頁按鈕 -->
+        <!-- 設定分頁按鈕 -->
         <button
           type="button"
           role="tab"
-          :aria-selected="currentTab === 'backup'"
+          :aria-selected="currentTab === 'settings'"
           class="flex flex-col items-center justify-center flex-1 py-1 rounded-xl transition-all"
-          :class="currentTab === 'backup' ? 'text-teal-700 font-bold' : 'text-slate-400 hover:text-slate-600 font-medium'"
-          @click="currentTab = 'backup'"
+          :class="currentTab === 'settings' ? 'text-teal-700 font-bold' : 'text-slate-400 hover:text-slate-600 font-medium'"
+          @click="currentTab = 'settings'"
         >
           <span class="text-lg">⚙️</span>
-          <span class="text-xs mt-0.5">備份</span>
+          <span class="text-xs mt-0.5">設定</span>
         </button>
       </div>
     </nav>

@@ -306,9 +306,9 @@ test.describe('Sand Dollar 端對端核心業務流程 (E2E Workflow)', () => {
   });
 
   test('5. 備份與還原：驗證 JSON 備份完整匯出包含收入資料並成功一鍵還原', async () => {
-    // 1. 切換至底部導航「備份 (Backup)」分頁
-    const backupTab = page.getByRole('navigation').getByRole('tab', { name: /備份/i });
-    await backupTab.click();
+    // 1. 切換至底部導航「設定 (Settings)」分頁（對齊設定頁規格）
+    const settingsTab = page.getByRole('navigation').getByRole('tab', { name: /設定/i });
+    await settingsTab.click();
 
     // 2. 監聽下載事件並點擊「匯出備份 (JSON)」
     const exportButton = page.getByRole('button', { name: /匯出備份\s*\(JSON\)/i });

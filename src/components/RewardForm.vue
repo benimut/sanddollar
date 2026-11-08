@@ -10,7 +10,14 @@
  */
 
 import { ref, computed, watch, onMounted } from 'vue';
-import { addReward, updateReward, getRewards } from '@/db';
+import {
+  addReward,
+  updateReward,
+  getRewards,
+  getRewardSourceRecords,
+  addRewardSource,
+  getDistinctRewardSources,
+} from '@/db';
 import { getCurrentMonthString } from '@/utils/date';
 import type { MonthlyReward } from '@/types';
 
@@ -44,18 +51,11 @@ onMounted(async () => {
 });
 
 /**
- * 載入資料庫中既有之回饋來源清單
+ * 載入資料庫中既有之回饋來源清單（只讀取回饋來源設定表，絕不聯集歷史表記錄）
  */
 async function loadDistinctRewardSources() {
   try {
-    const list = await getRewards();
-    const set = new Set<string>();
-    for (const r of list) {
-      if (r.sourceName && r.sourceName.trim()) {
-        set.add(r.sourceName.trim());
-      }
-    }
-    distinctRewardSources.value = Array.from(set);
+    distinctRewardSources.value = await getDistinctRewardSources();
   } catch {
     distinctRewardSources.value = [];
   }
@@ -144,6 +144,15 @@ async function handleSaveReward() {
   }
 
   errorMessage.value = '';
+
+  // 若使用者選取新增來源或自訂輸入名稱非空，自動持久化至回饋來源設定表
+  if (isAddingSource.value || (customSourceName.value.trim() && customSourceName.value.trim() === cleanSource)) {
+    try {
+      await addRewardSource(cleanSource);
+    } catch {
+      // 忽略已存在或重複錯誤，確保登記流程順暢
+    }
+  }
 
   const record: MonthlyReward = {
     yearMonth: rewardMonth.value,

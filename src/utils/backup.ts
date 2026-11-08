@@ -7,60 +7,26 @@
 
 import type { Table } from 'dexie';
 import { TrackerDatabase, db } from '@/db';
-import type { ExpenseRecord, IncomeRecord, MonthlyReward, CategoryRecord, PaymentMethodRecord } from '@/types';
+import type {
+  ExpenseRecord,
+  IncomeRecord,
+  MonthlyReward,
+  CategoryRecord,
+  PaymentMethodRecord,
+  IncomeSourceRecord,
+  RewardSourceRecord,
+  BackupDataPayload,
+  ImportBackupResult,
+} from '@/types';
+
+export type { BackupDataPayload, ImportBackupResult };
 
 /**
- * 備份資料酬載介面
- */
-export interface BackupDataPayload {
-  /** 備份資料格式版本號 (目前固定為 1) */
-  version: number;
-  /** 匯出時間戳記 (ISO 8601 格式字串，例如：2026-11-06T12:00:00.000Z) */
-  exportedAt: string;
-  /** 資料表記錄內容集合物件 */
-  data: {
-    /** 支出記錄陣列 */
-    expenses: ExpenseRecord[];
-    /** 收入記錄陣列 */
-    incomes: IncomeRecord[];
-    /** 每月回饋記錄陣列 */
-    rewards: MonthlyReward[];
-    /** 分類記錄陣列 */
-    categories: CategoryRecord[];
-    /** 支付方式記錄陣列 */
-    paymentMethods: PaymentMethodRecord[];
-  };
-}
-
-/**
- * 匯入結果統計資訊介面
- */
-export interface ImportBackupResult {
-  /** 是否匯入成功 */
-  success: boolean;
-  /** 各資料表成功匯入的筆數統計物件 */
-  importedCount: {
-    /** 匯入之支出記錄筆數 */
-    expenses: number;
-    /** 匯入之收入記錄筆數 */
-    incomes: number;
-    /** 匯入之每月回饋記錄筆數 */
-    rewards: number;
-    /** 匯入之分類記錄筆數 */
-    categories: number;
-    /** 匯入之支付方式記錄筆數 */
-    paymentMethods: number;
-  };
-  /** 錯誤訊息字串 (若失敗時提供具體失敗原因) */
-  error?: string;
-}
-
-/**
- * 匯出本地 IndexedDB 資料為 JSON 字串
- * 包含版本號、匯出時間戳記與支出、收入、每月回饋、分類及支付方式記錄
+ * 匯出本地 IndexedDB 資料庫資料為 JSON 字串
+ * 包含支出、收入、回饋、分類、支付方式、收入來源與回饋來源之完整備份
  *
  * @param dbInstance - 選填的資料庫實例，若未指定則使用全域預設 db
- * @returns 符合備份格式的 JSON 字串
+ * @returns 格式化後的 JSON 備份字串
  */
 export async function exportBackupData(dbInstance?: TrackerDatabase): Promise<string> {
   const targetDb = dbInstance ?? db;
@@ -70,6 +36,8 @@ export async function exportBackupData(dbInstance?: TrackerDatabase): Promise<st
   const rewards = await targetDb.rewards.toArray();
   const allCategories = targetDb.categories ? await targetDb.categories.toArray() : [];
   const paymentMethods = targetDb.paymentMethods ? await targetDb.paymentMethods.toArray() : [];
+  const incomeSources = targetDb.incomeSources ? await targetDb.incomeSources.toArray() : [];
+  const rewardSources = targetDb.rewardSources ? await targetDb.rewardSources.toArray() : [];
 
   // 若資料庫為全新空資料庫（完全無支出、收入、回饋記錄且無任何自訂分類），匯出之各表格為空陣列；
   // 若包含任一筆使用者業務數據或自訂分類，則完整匯出所有分類記錄（含預設種子分類與自訂分類）
@@ -78,6 +46,8 @@ export async function exportBackupData(dbInstance?: TrackerDatabase): Promise<st
     incomes.length > 0 ||
     rewards.length > 0 ||
     paymentMethods.length > 0 ||
+    incomeSources.length > 0 ||
+    rewardSources.length > 0 ||
     allCategories.some((c) => !c.isDefault);
   const categories = hasUserData ? allCategories : [];
 
@@ -90,6 +60,8 @@ export async function exportBackupData(dbInstance?: TrackerDatabase): Promise<st
       rewards,
       categories,
       paymentMethods,
+      incomeSources,
+      rewardSources,
     },
   };
 
@@ -110,7 +82,15 @@ export async function importBackupData(
   mode: 'overwrite' | 'merge' = 'overwrite',
   dbInstance?: TrackerDatabase
 ): Promise<ImportBackupResult> {
-  const emptyCount = { expenses: 0, incomes: 0, rewards: 0, categories: 0, paymentMethods: 0 };
+  const emptyCount = {
+    expenses: 0,
+    incomes: 0,
+    rewards: 0,
+    categories: 0,
+    paymentMethods: 0,
+    incomeSources: 0,
+    rewardSources: 0,
+  };
 
   // 1. 解析 JSON 字串
   let parsed: unknown;
@@ -191,14 +171,34 @@ export async function importBackupData(
     };
   }
 
+  if (payload.data.incomeSources !== undefined && !Array.isArray(payload.data.incomeSources)) {
+    return {
+      success: false,
+      importedCount: emptyCount,
+      error: '備份資料格式錯誤：incomeSources 必須為陣列',
+    };
+  }
+
+  if (payload.data.rewardSources !== undefined && !Array.isArray(payload.data.rewardSources)) {
+    return {
+      success: false,
+      importedCount: emptyCount,
+      error: '備份資料格式錯誤：rewardSources 必須為陣列',
+    };
+  }
+
   const targetDb = dbInstance ?? db;
   const { expenses, incomes, rewards } = payload.data;
   const categories = Array.isArray(payload.data.categories) ? payload.data.categories : [];
   const paymentMethods = Array.isArray(payload.data.paymentMethods) ? payload.data.paymentMethods : [];
+  const incomeSources = Array.isArray(payload.data.incomeSources) ? payload.data.incomeSources : [];
+  const rewardSources = Array.isArray(payload.data.rewardSources) ? payload.data.rewardSources : [];
 
   const tables: Table[] = [targetDb.expenses, targetDb.incomes, targetDb.rewards];
   if (targetDb.categories) tables.push(targetDb.categories);
   if (targetDb.paymentMethods) tables.push(targetDb.paymentMethods);
+  if (targetDb.incomeSources) tables.push(targetDb.incomeSources);
+  if (targetDb.rewardSources) tables.push(targetDb.rewardSources);
 
   try {
     if (mode === 'overwrite') {
@@ -212,6 +212,12 @@ export async function importBackupData(
         }
         if (targetDb.paymentMethods) {
           await targetDb.paymentMethods.clear();
+        }
+        if (targetDb.incomeSources) {
+          await targetDb.incomeSources.clear();
+        }
+        if (targetDb.rewardSources) {
+          await targetDb.rewardSources.clear();
         }
 
         if (expenses.length > 0) {
@@ -228,6 +234,12 @@ export async function importBackupData(
         }
         if (targetDb.paymentMethods && paymentMethods.length > 0) {
           await targetDb.paymentMethods.bulkAdd(paymentMethods);
+        }
+        if (targetDb.incomeSources && incomeSources.length > 0) {
+          await targetDb.incomeSources.bulkAdd(incomeSources);
+        }
+        if (targetDb.rewardSources && rewardSources.length > 0) {
+          await targetDb.rewardSources.bulkAdd(rewardSources);
         }
       });
     } else {
@@ -269,6 +281,30 @@ export async function importBackupData(
             }
           }
         }
+
+        // incomeSources 合併去重邏輯
+        if (targetDb.incomeSources && incomeSources.length > 0) {
+          const existingSources = await targetDb.incomeSources.toArray();
+          for (const item of incomeSources) {
+            const { id, ...rest } = item;
+            const isDup = existingSources.some((s) => s.name === rest.name);
+            if (!isDup) {
+              await targetDb.incomeSources.add(rest as IncomeSourceRecord);
+            }
+          }
+        }
+
+        // rewardSources 合併去重邏輯
+        if (targetDb.rewardSources && rewardSources.length > 0) {
+          const existingRewards = await targetDb.rewardSources.toArray();
+          for (const item of rewardSources) {
+            const { id, ...rest } = item;
+            const isDup = existingRewards.some((r) => r.name === rest.name);
+            if (!isDup) {
+              await targetDb.rewardSources.add(rest as RewardSourceRecord);
+            }
+          }
+        }
       });
     }
 
@@ -278,6 +314,8 @@ export async function importBackupData(
       rewards: rewards.length,
       categories: categories.length,
       paymentMethods: paymentMethods.length,
+      incomeSources: incomeSources.length,
+      rewardSources: rewardSources.length,
     };
 
     return {

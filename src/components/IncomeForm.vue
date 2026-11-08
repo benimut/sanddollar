@@ -17,6 +17,8 @@ import {
   addIncome,
   updateIncome,
   getDistinctIncomeSources,
+  getIncomeSourceRecords,
+  addIncomeSource,
 } from '@/db';
 import { useCategories } from '@/composables/useCategories';
 import { getTodayDateString } from '@/utils/date';
@@ -171,12 +173,11 @@ onMounted(async () => {
 });
 
 /**
- * 讀取歷史收入來源清單
+ * 讀取收入來源清單（只讀取收入來源設定表，絕不聯集歷史表記錄）
  */
 async function loadDistinctSources() {
   try {
-    const list = await getDistinctIncomeSources();
-    distinctSources.value = Array.isArray(list) ? list : [];
+    distinctSources.value = await getDistinctIncomeSources();
   } catch {
     distinctSources.value = [];
   }
@@ -270,12 +271,26 @@ async function handleSaveIncome() {
   }
 
   // 處理自訂收入來源建立或未填 fallback「未分類收入」
-  let finalSource = incomeSource.value?.trim() || '';
-  if (isAddingSource.value && customSourceName.value.trim()) {
-    finalSource = customSourceName.value.trim();
-  }
-  if (!finalSource || finalSource === '__add_new__') {
-    finalSource = '未分類收入';
+  let finalSource = '';
+  const isAddingState = isAddingSource.value || selectedSourceOption.value === '__add_new__';
+  if (isAddingState) {
+    const cleanCustom = customSourceName.value.trim();
+    if (cleanCustom) {
+      finalSource = cleanCustom;
+      try {
+        await addIncomeSource(cleanCustom);
+      } catch {
+        // 忽略已存在或重複錯誤，確保記帳流程順暢
+      }
+    } else {
+      // 自訂名稱為空：安全 fallback 為「未分類收入」，絕對禁止寫入設定表
+      finalSource = '未分類收入';
+    }
+  } else {
+    finalSource = selectedSourceOption.value?.trim() || incomeSource.value?.trim() || '';
+    if (!finalSource || finalSource === '__add_new__') {
+      finalSource = '未分類收入';
+    }
   }
 
   const finalAmount = Number(incomeAmount.value) || 0;

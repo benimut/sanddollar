@@ -13,6 +13,8 @@ import {
   getRewards,
   getDistinctMerchants,
   getItemsByMerchant,
+  getDistinctIncomeSources,
+  addIncomeSource,
 } from '@/db';
 import type { ExpenseRecord, IncomeRecord, MonthlyReward, CategoryRecord } from '@/types';
 
@@ -23,6 +25,7 @@ describe('Dexie.js 本地資料庫模型與儲存操作 (TrackerDatabase & db se
       if (db.expenses) await db.expenses.clear();
       if (db.incomes) await db.incomes.clear();
       if (db.rewards) await db.rewards.clear();
+      if (db.incomeSources) await db.incomeSources.clear();
     }
   });
 
@@ -47,15 +50,15 @@ describe('Dexie.js 本地資料庫模型與儲存操作 (TrackerDatabase & db se
       expect((db as any).categories).toBeDefined();
     });
 
-    it('全域單例 db 之名稱應為 MobileExpenseTrackerDB 且版本為 3', () => {
+    it('全域單例 db 之名稱應為 MobileExpenseTrackerDB 且版本為 4', () => {
       expect(db.name).toBe('MobileExpenseTrackerDB');
-      expect(db.verno).toBe(3);
+      expect(db.verno).toBe(4);
     });
 
-    it('TrackerDatabase 建構子應支援自訂 dbName 並維持版本 3', () => {
+    it('TrackerDatabase 建構子應支援自訂 dbName 並維持版本 4', () => {
       const customDb = new TrackerDatabase('CustomIsolatedDB');
       expect(customDb.name).toBe('CustomIsolatedDB');
-      expect(customDb.verno).toBe(3);
+      expect(customDb.verno).toBe(4);
       customDb.close();
     });
 
@@ -532,18 +535,13 @@ describe('Dexie.js 本地資料庫模型與儲存操作 (TrackerDatabase & db se
     });
   });
 
-  describe('歷史收入來源去重查詢 (getDistinctIncomeSources)', () => {
-    it('無任何收入記錄時，getDistinctIncomeSources 應回傳空陣列 []', async () => {
-      const getDistinctIncomeSources = (dbModule as any).getDistinctIncomeSources;
-
+  describe('收入來源去重查詢與設定表管理 (getDistinctIncomeSources & addIncomeSource)', () => {
+    it('當 incomeSources 設定表為空時，即使 incomes 歷史表記錄存在多筆資料，getDistinctIncomeSources 亦必須回傳空陣列 []（嚴禁回退讀取歷史表記錄）', async () => {
+      // 確保 incomeSources 設定表為空
+      await db.incomeSources.clear();
       await db.incomes.clear();
-      const sources = await getDistinctIncomeSources();
-      expect(sources).toEqual([]);
-    });
 
-    it('存在多筆收入記錄時，應提取不重複之收入來源清單', async () => {
-      const getDistinctIncomeSources = (dbModule as any).getDistinctIncomeSources;
-
+      // 新增多筆歷史收入記錄
       await addIncome({
         date: '2026-11-01',
         source: '11月薪水',
@@ -564,93 +562,50 @@ describe('Dexie.js 本地資料庫模型與儲存操作 (TrackerDatabase & db se
         createdAt: 2,
         updatedAt: 2,
       });
-      await addIncome({
-        date: '2026-11-03',
-        source: '11月薪水', // 重複
-        account: '玉山銀行',
-        category: '薪資',
-        amount: 5000,
-        isForeign: false,
-        createdAt: 3,
-        updatedAt: 3,
-      });
-      await addIncome({
-        date: '2026-11-04',
-        source: '投資獲利',
-        account: '台泥證券',
-        category: '投資',
-        amount: 8000,
-        isForeign: false,
-        createdAt: 4,
-        updatedAt: 4,
-      });
+
+      // 依據 v2.1 規格，getDistinctIncomeSources 僅純讀取 incomeSources 設定表
+      // 當設定表為空時，嚴禁回退讀取 incomes 歷史表，必須回傳空陣列 []
+      const sources = await getDistinctIncomeSources();
+      expect(sources).toEqual([]);
+    });
+
+    it('向 incomeSources 設定表新增來源後，getDistinctIncomeSources 應正確回傳去重且修剪前後空白的來源清單', async () => {
+      await db.incomeSources.clear();
+
+      await addIncomeSource('  薪資收入  ');
+      await addIncomeSource('接案報酬');
+      await addIncomeSource('投資獲利');
 
       const sources = await getDistinctIncomeSources();
       expect(sources.length).toBe(3);
-      expect(sources).toContain('11月薪水');
+      expect(sources).toContain('薪資收入');
       expect(sources).toContain('接案報酬');
       expect(sources).toContain('投資獲利');
+      // 確保前後空白已被修剪
+      expect(sources).not.toContain('  薪資收入  ');
     });
 
-    it('若 source 包含前後空白應自動 trim 去重，並排除純空白與空字串', async () => {
-      const getDistinctIncomeSources = (dbModule as any).getDistinctIncomeSources;
+    it('驗證 addIncomeSource 防空字串與純空白字串防呆驗證', async () => {
+      await expect(addIncomeSource('')).rejects.toThrow('收入來源名稱不可為空');
+      await expect(addIncomeSource('   ')).rejects.toThrow('收入來源名稱不可為空');
+    });
 
-      await addIncome({
-        date: '2026-11-01',
-        source: '  薪資收入  ',
-        account: '玉山銀行',
-        category: '薪資',
-        amount: 50000,
-        isForeign: false,
-        createdAt: 1,
-        updatedAt: 1,
-      });
-      await addIncome({
-        date: '2026-11-02',
-        source: '薪資收入', // trim 後應與前一筆相同而合一
-        account: '玉山銀行',
-        category: '薪資',
-        amount: 5000,
-        isForeign: false,
-        createdAt: 2,
-        updatedAt: 2,
-      });
-      await addIncome({
-        date: '2026-11-03',
-        source: '   ', // 純空白字串，應排除
-        account: '現金',
-        category: '其他',
-        amount: 100,
-        isForeign: false,
-        createdAt: 3,
-        updatedAt: 3,
-      });
-      await addIncome({
-        date: '2026-11-04',
-        source: '', // 空字串，應排除
-        account: '現金',
-        category: '其他',
-        amount: 200,
-        isForeign: false,
-        createdAt: 4,
-        updatedAt: 4,
-      });
-      await addIncome({
-        date: '2026-11-05',
-        source: ' 獎金 ',
-        account: '台新銀行',
-        category: '獎金',
-        amount: 20000,
-        isForeign: false,
-        createdAt: 5,
-        updatedAt: 5,
-      });
+    it('驗證 addIncomeSource 同名防重與持久化寫入行為', async () => {
+      await db.incomeSources.clear();
 
-      const sources = await getDistinctIncomeSources();
-      expect(sources.length).toBe(2);
-      expect(sources).toEqual(expect.arrayContaining(['薪資收入', '獎金']));
-      expect(sources).not.toContain('');
-      expect(sources).not.toContain('   ');
+      const id1 = await addIncomeSource('公司薪資');
+      expect(id1).toBeGreaterThan(0);
+
+      // 同名重複新增應拋出錯誤
+      await expect(addIncomeSource('公司薪資')).rejects.toThrow('收入來源「公司薪資」已存在');
+      // 前後空白修剪後同名亦應拋出錯誤
+      await expect(addIncomeSource('  公司薪資  ')).rejects.toThrow('收入來源「公司薪資」已存在');
+
+      // 驗證持久化寫入 IndexedDB 實體表格
+      const records = await db.incomeSources.toArray();
+      expect(records.length).toBe(1);
+      expect(records[0].name).toBe('公司薪資');
+      expect(records[0].isDefault).toBe(false);
     });
   });
 
