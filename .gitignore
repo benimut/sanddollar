@@ -42,3 +42,4 @@ pnpm-debug.log*
 # Test reports and artifacts
 playwright-report/
 test-results/
+TODO.md
