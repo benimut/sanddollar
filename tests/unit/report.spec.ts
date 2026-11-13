@@ -625,13 +625,13 @@ describe('統計報表數據轉換核心模組 (report utility)', () => {
 
       expect(result.labels).toEqual(['2024-10', '2024-11', '2024-12']);
 
-      // 檢查薪資 dataset，應在 2024-10 為 -50000，其餘月份為 0
-      const salaryDataset = result.datasets.find((d) => d.label === '薪資');
+      // 檢查薪資 dataset，應在 2024-10 為正數 50000，其餘月份為 0
+      const salaryDataset = result.datasets.find((d) => d.label === '收入 - 薪資');
       expect(salaryDataset).toBeDefined();
-      expect(salaryDataset?.data).toEqual([-50000, 0, 0]);
+      expect(salaryDataset?.data).toEqual([50000, 0, 0]);
     });
 
-    it('0 軸正負堆疊驗證：支出分類為正數，收入分類與回饋均為負數，且 stack 群組均為 balance', () => {
+    it('並排雙柱堆疊驗證：收入分類與回饋位於左柱 (stack: income) 且為正數，支出分類位於右柱 (stack: expense) 且為正數', () => {
       const mockExpenses: ExpenseRecord[] = [
         {
           date: '2024-10-02',
@@ -748,44 +748,41 @@ describe('統計報表數據轉換核心模組 (report utility)', () => {
 
       expect(result.labels).toEqual(['2024-10', '2024-11']);
 
-      // 所有 dataset 必須帶有 stack: 'balance'
-      result.datasets.forEach((ds) => {
-        expect(ds.stack).toBe('balance');
-      });
-
-      // 檢查支出分類 (餐飲、交通) 數據在 0 軸上方 (正數)
-      const foodDs = result.datasets.find((ds) => ds.label === '餐飲');
+      // 檢查支出分類 (支出 - 餐飲、支出 - 交通) 位於右柱 (stack: 'expense') 且數值 >= 0
+      const foodDs = result.datasets.find((ds) => ds.label === '支出 - 餐飲');
       expect(foodDs).toBeDefined();
+      expect(foodDs?.stack).toBe('expense');
       expect(foodDs?.data).toEqual([1200, 600]);
       foodDs?.data.forEach((val) => {
         expect(val).toBeGreaterThanOrEqual(0);
       });
 
-      const trafficDs = result.datasets.find((ds) => ds.label === '交通');
+      const trafficDs = result.datasets.find((ds) => ds.label === '支出 - 交通');
       expect(trafficDs).toBeDefined();
+      expect(trafficDs?.stack).toBe('expense');
       expect(trafficDs?.data).toEqual([800, 0]);
 
-      // 檢查收入分類 (薪資、兼職) 數據在 0 軸下方 (負數)
-      const salaryDs = result.datasets.find((ds) => ds.label === '薪資');
+      // 檢查收入分類 (收入 - 薪資、收入 - 兼職) 位於左柱 (stack: 'income') 且數值 >= 0
+      const salaryDs = result.datasets.find((ds) => ds.label === '收入 - 薪資');
       expect(salaryDs).toBeDefined();
-      expect(salaryDs?.data).toEqual([-50000, -52000]);
+      expect(salaryDs?.stack).toBe('income');
+      expect(salaryDs?.data).toEqual([50000, 52000]);
       salaryDs?.data.forEach((val) => {
-        expect(val).toBeLessThanOrEqual(0);
+        expect(val).toBeGreaterThanOrEqual(0);
       });
 
-      const partTimeDs = result.datasets.find((ds) => ds.label === '兼職');
+      const partTimeDs = result.datasets.find((ds) => ds.label === '收入 - 兼職');
       expect(partTimeDs).toBeDefined();
-      expect(partTimeDs?.data).toEqual([0, -8000]);
+      expect(partTimeDs?.stack).toBe('income');
+      expect(partTimeDs?.data).toEqual([0, 8000]);
 
-      // 檢查回饋 dataset 數據在 0 軸下方 (負數)
-      // 回饋 label 通常為「回饋」或「每月回饋」
-      const rewardDs = result.datasets.find(
-        (ds) => ds.label === '每月回饋' || ds.label === '回饋',
-      );
+      // 檢查回饋 dataset 位於左柱 (stack: 'income')，label 為「每月回饋」且數值 >= 0
+      const rewardDs = result.datasets.find((ds) => ds.label === '每月回饋');
       expect(rewardDs).toBeDefined();
-      expect(rewardDs?.data).toEqual([-500, -750]);
+      expect(rewardDs?.stack).toBe('income');
+      expect(rewardDs?.data).toEqual([500, 750]);
       rewardDs?.data.forEach((val) => {
-        expect(val).toBeLessThanOrEqual(0);
+        expect(val).toBeGreaterThanOrEqual(0);
       });
     });
   });
@@ -1045,16 +1042,25 @@ describe('ReportView.vue - 報表元件圖表動態渲染與假 SVG 排除驗證
       expect(barChartInstance.config.data).toBeDefined();
       expect(barChartInstance.config.data.labels).toContain('2024-11');
 
-      // datasets 必須有資料且 stack 為 'balance'
+      // datasets 必須有資料且 stack 依收支分別為 'income' 或 'expense'
       const datasets = barChartInstance.config.data.datasets;
       expect(datasets.length).toBeGreaterThan(0);
       datasets.forEach((ds: any) => {
-        expect(ds.stack).toBe('balance');
+        expect(['income', 'expense']).toContain(ds.stack);
       });
 
-      // 驗證 x 與 y 軸尺度皆設定為 stacked: true
+      // 驗證 x 與 y 軸尺度皆設定為 stacked: true，且 y 軸從 0 開始
       expect(barChartInstance.config.options?.scales?.x?.stacked).toBe(true);
       expect(barChartInstance.config.options?.scales?.y?.stacked).toBe(true);
+      expect(barChartInstance.config.options?.scales?.y?.beginAtZero).toBe(true);
+
+      // 驗證自訂分組圖例區塊呈現收入、支出、回饋各一列
+      const legendGroups = container.querySelector('[data-testid="bar-legend-groups"]');
+      expect(legendGroups).not.toBeNull();
+      expect(legendGroups?.textContent).toContain('收入：');
+      expect(legendGroups?.textContent).toContain('支出：');
+      expect(legendGroups?.textContent).toContain('回饋：');
+      expect(legendGroups?.textContent).toContain('每月回饋');
     } finally {
       cleanup();
     }

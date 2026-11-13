@@ -6,7 +6,7 @@
  * 核心業務職責：
  * 1. 財務核心摘要卡片：呈現總進帳 (totalIncome)、總支出 (totalExpense) 與當期結餘 (balance)。
  * 2. 分類比例圓餅圖：整合 Chart.js PieController，動態呼叫 generateCategoryPieData，支援支出/收入分類佔比即時切換。
- * 3. 每月收支堆疊長條圖：整合 Chart.js BarController 與 generateStackedBarData，呈現 0 軸正負堆疊分析。
+ * 3. 每月收支堆疊長條圖：整合 Chart.js BarController 與 generateStackedBarData，呈現並排雙柱堆疊分析（收入/回饋 vs 支出）。
  * 4. 自訂起訖月份區間篩選：支援快選（近3個月、近6個月、近12個月、全部）與精確手動輸入起訖月份 (#report-start-month, #report-end-month)。
  */
 
@@ -30,6 +30,7 @@ import {
   generateStackedBarData,
   extractAvailableMonths,
   filterMonthsByCustomRange,
+  type StackedBarDataset,
 } from '@/utils/report';
 import type { ExpenseRecord, IncomeRecord, MonthlyReward, FinancialSummary } from '@/types';
 
@@ -88,6 +89,43 @@ const barCanvasRef = ref<HTMLCanvasElement | null>(null);
 
 let pieChartInstance: Chart | null = null;
 let barChartInstance: Chart | null = null;
+
+/**
+ * 長條圖自訂分組圖例項目
+ */
+interface BarLegendItem {
+  index: number;
+  label: string;
+  color: string;
+  categoryType: 'income' | 'reward' | 'expense';
+  hidden: boolean;
+}
+
+const barLegendItems = ref<BarLegendItem[]>([]);
+
+const incomeLegendItems = computed(() =>
+  barLegendItems.value.filter((item) => item.categoryType === 'income')
+);
+const expenseLegendItems = computed(() =>
+  barLegendItems.value.filter((item) => item.categoryType === 'expense')
+);
+const rewardLegendItems = computed(() =>
+  barLegendItems.value.filter((item) => item.categoryType === 'reward')
+);
+
+/**
+ * 切換長條圖指定資料集的顯示/隱藏狀態
+ */
+function toggleBarDataset(index: number) {
+  const item = barLegendItems.value[index];
+  if (!item) return;
+  const nextHidden = !item.hidden;
+  item.hidden = nextHidden;
+  if (barChartInstance && typeof barChartInstance.setDatasetVisibility === 'function') {
+    barChartInstance.setDatasetVisibility(index, !nextHidden);
+    barChartInstance.update();
+  }
+}
 
 /**
  * 依當前選取之 selectedMonth 計算財務核心摘要
@@ -199,7 +237,7 @@ function setQuickRange(type: '3' | '6' | '12' | 'all') {
 }
 
 /**
- * 渲染或更新 0 軸堆疊長條圖
+ * 渲染或更新並排雙柱堆疊長條圖
  */
 function renderBarChart() {
   if (!barCanvasRef.value) return;
@@ -228,6 +266,15 @@ function renderBarChart() {
     filteredMonths.length > 0 ? filteredMonths : undefined
   );
 
+  // 同步建立分組圖例項目（依 stack/categoryType 分類）
+  barLegendItems.value = barData.datasets.map((ds: StackedBarDataset, index: number) => ({
+    index,
+    label: ds.label,
+    color: ds.backgroundColor,
+    categoryType: ds.categoryType ?? (ds.stack === 'expense' ? 'expense' : 'income'),
+    hidden: false,
+  }));
+
   const ctx = barCanvasRef.value.getContext('2d');
   if (!ctx) return;
 
@@ -251,33 +298,25 @@ function renderBarChart() {
         },
         y: {
           stacked: true,
+          beginAtZero: true,
           ticks: {
             font: {
               size: 10,
             },
-            callback: (val) => {
-              const num = Number(val);
-              return num < 0 ? `-$${Math.abs(num)}` : `$${num}`;
-            },
+            callback: (val) => `$${Number(val)}`,
           },
         },
       },
       plugins: {
         legend: {
-          position: 'bottom',
-          labels: {
-            boxWidth: 10,
-            font: {
-              size: 10,
-            },
-          },
+          // 關閉預設圖例，改以下方收入、支出、回饋各一列之自訂圖例呈現
+          display: false,
         },
         tooltip: {
           callbacks: {
             label: (item) => {
               const val = Number(item.raw) || 0;
-              const type = val >= 0 ? '支出' : '收入/回饋';
-              return ` ${item.dataset.label} (${type}): NT$ ${Math.abs(val)}`;
+              return ` ${item.dataset.label}: NT$ ${val}`;
             },
           },
         },
@@ -461,6 +500,58 @@ onUnmounted(() => {
       <!-- 堆疊長條圖畫布容器 -->
       <div class="h-64 relative flex items-center justify-center">
         <canvas ref="barCanvasRef" class="w-full h-full"></canvas>
+      </div>
+
+      <!-- 分組圖例：收入、支出、回饋各一列 -->
+      <div
+        v-if="barLegendItems.length > 0"
+        class="mt-3 pt-2.5 border-t border-slate-100 space-y-1.5 text-[11px]"
+        data-testid="bar-legend-groups"
+      >
+        <div v-if="incomeLegendItems.length > 0" class="flex flex-wrap items-center gap-x-3 gap-y-1">
+          <span class="font-semibold text-slate-500 shrink-0">收入：</span>
+          <button
+            v-for="item in incomeLegendItems"
+            :key="item.index"
+            type="button"
+            class="inline-flex items-center gap-1.5 transition-opacity"
+            :class="item.hidden ? 'opacity-40 line-through' : 'opacity-100'"
+            @click="toggleBarDataset(item.index)"
+          >
+            <span class="w-2.5 h-2.5 rounded-sm shrink-0" :style="{ backgroundColor: item.color }"></span>
+            <span class="text-slate-700">{{ item.label }}</span>
+          </button>
+        </div>
+
+        <div v-if="expenseLegendItems.length > 0" class="flex flex-wrap items-center gap-x-3 gap-y-1">
+          <span class="font-semibold text-slate-500 shrink-0">支出：</span>
+          <button
+            v-for="item in expenseLegendItems"
+            :key="item.index"
+            type="button"
+            class="inline-flex items-center gap-1.5 transition-opacity"
+            :class="item.hidden ? 'opacity-40 line-through' : 'opacity-100'"
+            @click="toggleBarDataset(item.index)"
+          >
+            <span class="w-2.5 h-2.5 rounded-sm shrink-0" :style="{ backgroundColor: item.color }"></span>
+            <span class="text-slate-700">{{ item.label }}</span>
+          </button>
+        </div>
+
+        <div v-if="rewardLegendItems.length > 0" class="flex flex-wrap items-center gap-x-3 gap-y-1">
+          <span class="font-semibold text-slate-500 shrink-0">回饋：</span>
+          <button
+            v-for="item in rewardLegendItems"
+            :key="item.index"
+            type="button"
+            class="inline-flex items-center gap-1.5 transition-opacity"
+            :class="item.hidden ? 'opacity-40 line-through' : 'opacity-100'"
+            @click="toggleBarDataset(item.index)"
+          >
+            <span class="w-2.5 h-2.5 rounded-sm shrink-0" :style="{ backgroundColor: item.color }"></span>
+            <span class="text-slate-700">{{ item.label }}</span>
+          </button>
+        </div>
       </div>
     </div>
   </div>
