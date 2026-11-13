@@ -147,10 +147,12 @@ interface FormDiscount {
   id: string;
   /** 折抵項目名稱 */
   name: string;
-  /** 折抵金額 (大於 0 之正數) */
+  /** 折抵金額 (大於等於 0 之正數) */
   amount: number;
   /** 歸屬分類 */
   category: string;
+  /** 編輯舊資料載入時保留之原始歷史分類（若不在現有商品分類內供修改用） */
+  legacyCategory?: string;
 }
 
 // 折扣明細清單
@@ -191,6 +193,145 @@ watch(merchant, async (val) => {
 });
 
 // ==================== 計算屬性 ====================
+
+/**
+ * 判斷商品列是否為有效商品（須同時滿足：品名非空、已選擇有效分類、數量大於 0）
+ */
+function isValidFormItem(item: FormItem): boolean {
+  const cat = item.category?.trim();
+  return (
+    item.name.trim() !== '' &&
+    Boolean(cat && cat !== '__add_new__') &&
+    (Number(item.quantity) || 0) > 0
+  );
+}
+
+/**
+ * 同筆支出中有效商品所擁有的不重複分類清單
+ */
+const availableDiscountCategories = computed<string[]>(() => {
+  const cats: string[] = [];
+  for (const it of items.value) {
+    if (!isValidFormItem(it)) continue;
+    const cat = it.category.trim();
+    if (!cats.includes(cat)) {
+      cats.push(cat);
+    }
+  }
+  return cats;
+});
+
+/**
+ * 依分類計算同筆支出中有效商品的小計總和
+ */
+const categorySubtotals = computed<Record<string, number>>(() => {
+  const map: Record<string, number> = {};
+  for (const it of items.value) {
+    if (!isValidFormItem(it)) continue;
+    const cat = it.category.trim();
+    const sub = (Number(it.quantity) || 0) * (Number(it.unitPrice) || 0);
+    map[cat] = (map[cat] || 0) + sub;
+  }
+  return map;
+});
+
+/**
+ * 是否允許新增折扣（須至少有一筆有效商品且有至少一個商品分類）
+ */
+const canAddDiscount = computed(() => availableDiscountCategories.value.length > 0);
+
+/**
+ * 取得指定折扣項目的分類下拉選項（編輯舊資料時保留原始歷史分類）
+ */
+function getDiscountCategoryOptions(disc: FormDiscount): string[] {
+  const base = [...availableDiscountCategories.value];
+  if (disc.legacyCategory && !base.includes(disc.legacyCategory)) {
+    base.push(disc.legacyCategory);
+  }
+  return base;
+}
+
+/**
+ * 計算指定索引的折扣項目目前剩餘可折抵上限
+ */
+function getMaxDiscountAmount(dIdx: number): number | undefined {
+  const target = discounts.value[dIdx];
+  if (!target) return undefined;
+  const cat = target.category?.trim();
+  if (!cat || !(cat in categorySubtotals.value)) {
+    return target.legacyCategory === cat ? undefined : 0;
+  }
+  const usedByOthers = discounts.value.reduce((sum, d, idx) => {
+    if (idx === dIdx || d.category !== cat) return sum;
+    return sum + Math.max(0, Number(d.amount) || 0);
+  }, 0);
+  return Math.max(0, categorySubtotals.value[cat] - usedByOthers);
+}
+
+/**
+ * 依各分類有效商品小計截斷超額折扣，並清除負數或無效值
+ */
+function clampDiscountsToCategoryLimits() {
+  const usedByCat: Record<string, number> = {};
+  for (const d of discounts.value) {
+    let amt = Number(d.amount);
+    if (!Number.isFinite(amt) || amt < 0) {
+      amt = 0;
+    }
+    const cat = d.category?.trim();
+    if (cat && cat in categorySubtotals.value) {
+      const remaining = Math.max(0, categorySubtotals.value[cat] - (usedByCat[cat] || 0));
+      if (amt > remaining) {
+        amt = remaining;
+      }
+      usedByCat[cat] = (usedByCat[cat] || 0) + amt;
+    }
+    d.amount = amt;
+  }
+}
+
+/**
+ * 處理折扣金額輸入，即時截斷超過該分類剩餘可折抵上限之數值並同步輸入框顯示
+ */
+function handleDiscountAmountInput(dIdx: number, e: Event) {
+  const target = e.target as HTMLInputElement | null;
+  const disc = discounts.value[dIdx];
+  if (!disc) return;
+
+  clampDiscountsToCategoryLimits();
+  if (target && Number(target.value) !== disc.amount) {
+    target.value = String(disc.amount);
+  }
+}
+
+/**
+ * 處理折扣分類切換：若切換為商品分類則清除歷史分類標記並重新檢核上限
+ */
+function handleDiscountCategorySelectChange(dIdx: number) {
+  const disc = discounts.value[dIdx];
+  if (!disc) return;
+  if (disc.legacyCategory && disc.category !== disc.legacyCategory) {
+    disc.legacyCategory = undefined;
+  }
+  clampDiscountsToCategoryLimits();
+}
+
+// 商品分類變動時，直接刪除已不存在於同筆支出商品分類中的折扣項目（保留編輯舊資料之 legacyCategory）
+watch(availableDiscountCategories, (cats) => {
+  if (cats.length === 0) {
+    discounts.value = [];
+    return;
+  }
+  discounts.value = discounts.value.filter(
+    (d) => cats.includes(d.category) || (Boolean(d.legacyCategory) && d.category === d.legacyCategory)
+  );
+  clampDiscountsToCategoryLimits();
+});
+
+// 商品數量或單價變動導致分類小計下降時，自動截斷超額折扣
+watch(categorySubtotals, () => {
+  clampDiscountsToCategoryLimits();
+});
 
 // 商品小計加總
 const itemsSubtotal = computed(() => {
@@ -246,12 +387,16 @@ watch(
         }
 
         if (discountItems.length > 0) {
-          discounts.value = discountItems.map((d, idx) => ({
-            id: d.id || `disc-${idx}-${Date.now()}`,
-            name: d.name,
-            amount: Math.abs(d.unitPrice),
-            category: d.category || '其他',
-          }));
+          discounts.value = discountItems.map((d, idx) => {
+            const cat = d.category || '其他';
+            return {
+              id: d.id || `disc-${idx}-${Date.now()}`,
+              name: d.name,
+              amount: Math.abs(d.unitPrice),
+              category: cat,
+              legacyCategory: cat,
+            };
+          });
         }
       }
     }
@@ -413,23 +558,46 @@ function addItem() {
 }
 
 /**
- * 移除指定索引的購買商品
+ * 移除指定索引的購買商品（僅剩一筆時重設為空白預設值，確保至少保留一列）
  */
 function removeItem(index: number) {
   if (items.value.length > 1) {
     items.value.splice(index, 1);
+  } else if (items.value.length === 1 && items.value[0]) {
+    // 僅剩最後一筆時重設為空白商品列，避免破壞表單至少一列的預設結構
+    items.value[0] = {
+      id: `item-${Date.now()}`,
+      name: '',
+      quantity: 1,
+      unitPrice: 0,
+      category: expenseCategoryList.value[0] || '',
+    };
   }
 }
 
 /**
- * 新增一筆獨立折抵項目
+ * 數量輸入框取得焦點時自動全選內容，方便直接輸入新數量
+ * 使用 requestAnimationFrame 避免滑鼠點擊時的 mouseup 事件取消選取範圍
+ */
+function handleQuantityFocus(e: FocusEvent) {
+  const target = e.target as HTMLInputElement | null;
+  if (!target) return;
+  target.select();
+  requestAnimationFrame(() => {
+    target.select();
+  });
+}
+
+/**
+ * 新增一筆獨立折抵項目（僅在有有效商品且有可用分類時允許）
  */
 function addDiscount() {
+  if (!canAddDiscount.value) return;
   discounts.value.push({
     id: `disc-${Date.now()}`,
     name: '',
     amount: 0,
-    category: '其他',
+    category: availableDiscountCategories.value[0],
   });
 }
 
@@ -588,22 +756,26 @@ async function handleSaveExpense() {
     }
   }
 
-  // 轉換折扣折抵項目
-  for (const d of discounts.value) {
-    if (d.name.trim() || d.amount > 0) {
-      let discCategory = d.category?.trim();
-      if (!discCategory || discCategory === '__add_new__') {
-        discCategory = '其他';
+  // 轉換折扣折抵項目（僅在同筆支出有商品分類時儲存；編輯舊資料保留之 legacyCategory 亦允許儲存）
+  if (availableDiscountCategories.value.length > 0) {
+    clampDiscountsToCategoryLimits();
+    for (const d of discounts.value) {
+      if (d.name.trim() || d.amount > 0) {
+        let discCategory = d.category?.trim();
+        const isLegacy = Boolean(d.legacyCategory) && discCategory === d.legacyCategory;
+        if (!discCategory || (!availableDiscountCategories.value.includes(discCategory) && !isLegacy)) {
+          discCategory = availableDiscountCategories.value[0];
+        }
+        expenseItems.push({
+          id: d.id,
+          type: 'discount',
+          name: d.name || '折抵項目',
+          quantity: 1,
+          unitPrice: -(Number(d.amount) || 0),
+          subtotal: -(Number(d.amount) || 0),
+          category: discCategory,
+        });
       }
-      expenseItems.push({
-        id: d.id,
-        type: 'discount',
-        name: d.name || '折抵項目',
-        quantity: 1,
-        unitPrice: -(Number(d.amount) || 0),
-        subtotal: -(Number(d.amount) || 0),
-        category: discCategory,
-      });
     }
   }
 
@@ -766,7 +938,6 @@ async function handleSaveExpense() {
               [選擇]
             </button>
             <button
-              v-if="items.length > 1"
               type="button"
               class="text-xs text-rose-500 hover:text-rose-700 font-medium px-2 py-1 rounded hover:bg-rose-50"
               @click="removeItem(idx)"
@@ -804,6 +975,7 @@ async function handleSaveExpense() {
               min="1"
               placeholder="數量"
               class="w-full text-sm border border-slate-200 rounded-lg p-1.5 bg-white focus:ring-2 focus:ring-teal-500 focus:outline-none"
+              @focus="handleQuantityFocus"
             />
           </div>
 
@@ -881,7 +1053,9 @@ async function handleSaveExpense() {
         </button>
         <button
           type="button"
-          class="text-xs text-rose-600 hover:text-rose-700 font-medium py-1 px-2 border border-rose-200 rounded-lg hover:bg-rose-50 transition-colors"
+          :disabled="!canAddDiscount"
+          :title="!canAddDiscount ? '請先填寫商品並選擇商品分類' : ''"
+          class="text-xs text-rose-600 hover:text-rose-700 font-medium py-1 px-2 border border-rose-200 rounded-lg hover:bg-rose-50 transition-colors disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-transparent"
           @click="addDiscount"
         >
           + 新增折扣
@@ -899,15 +1073,16 @@ async function handleSaveExpense() {
             <span class="text-xs text-rose-700 font-semibold">折抵項目 {{ dIdx + 1 }}</span>
             <button
               type="button"
-              class="text-xs text-rose-500 hover:text-rose-700"
+              class="text-xs text-rose-500 hover:text-rose-700 font-medium px-2 py-1 rounded hover:bg-rose-50"
               @click="removeDiscount(dIdx)"
+              aria-label="刪除此折扣"
             >
-              移除
+              刪除
             </button>
           </div>
 
           <div class="grid grid-cols-12 gap-2">
-            <div class="col-span-8">
+            <div class="col-span-12 sm:col-span-5">
               <label :for="`disc-name-${dIdx}`" class="block text-[11px] text-slate-500 mb-0.5">折扣名稱</label>
               <input
                 :id="`disc-name-${dIdx}`"
@@ -917,15 +1092,30 @@ async function handleSaveExpense() {
                 class="w-full text-sm border border-slate-200 rounded-lg p-1.5 bg-white focus:ring-2 focus:ring-teal-500 focus:outline-none"
               />
             </div>
-            <div class="col-span-4">
+            <div class="col-span-7 sm:col-span-4">
+              <label :for="`disc-cat-${dIdx}`" class="block text-[11px] text-slate-500 mb-0.5">折扣分類</label>
+              <select
+                :id="`disc-cat-${dIdx}`"
+                v-model="disc.category"
+                class="w-full text-sm border border-slate-200 rounded-lg p-1.5 bg-white focus:ring-2 focus:ring-teal-500 focus:outline-none"
+                @change="handleDiscountCategorySelectChange(dIdx)"
+              >
+                <option v-for="cat in getDiscountCategoryOptions(disc)" :key="cat" :value="cat">
+                  {{ cat }}
+                </option>
+              </select>
+            </div>
+            <div class="col-span-5 sm:col-span-3">
               <label :for="`disc-amount-${dIdx}`" class="block text-[11px] text-slate-500 mb-0.5">折抵金額</label>
               <input
                 :id="`disc-amount-${dIdx}`"
                 v-model.number="disc.amount"
                 type="number"
                 min="0"
+                :max="getMaxDiscountAmount(dIdx)"
                 placeholder="折抵金額"
                 class="w-full text-sm border border-slate-200 rounded-lg p-1.5 bg-white focus:ring-2 focus:ring-teal-500 focus:outline-none"
+                @input="handleDiscountAmountInput(dIdx, $event)"
               />
             </div>
           </div>
