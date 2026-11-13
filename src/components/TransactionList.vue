@@ -475,16 +475,16 @@ function formatAmount(num: number): string {
         class="bg-white rounded-xl p-3.5 border border-slate-100 border-l-4 shadow-sm flex items-center gap-3"
         :class="tx.accentBorderClass"
       >
-        <!-- 左側：商店/來源名稱、商品明細與備註 -->
+        <!-- 左側：商店/來源名稱（收入分類置於上方）、商品明細與備註 -->
         <div class="flex-1 min-w-0 space-y-1">
-          <div class="flex items-center gap-1.5 min-w-0">
-            <span class="text-xs font-bold text-slate-800 truncate" :title="tx.title">{{ tx.title }}</span>
+          <div class="flex flex-col items-start gap-0.5 min-w-0">
             <span
               v-if="tx.categoryBadge"
-              class="text-[11px] bg-slate-100 text-slate-600 px-1.5 py-0.5 rounded shrink-0"
+              class="text-[11px] bg-slate-100 text-slate-600 px-1.5 py-0.5 rounded"
             >
               {{ tx.categoryBadge }}
             </span>
+            <span class="text-xs font-bold text-slate-800 truncate w-full" :title="tx.title">{{ tx.title }}</span>
           </div>
 
           <!-- 商品明細展示（一筆一行，最多顯示前三筆，超過顯示 ...） -->

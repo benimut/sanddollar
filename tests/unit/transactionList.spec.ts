@@ -819,6 +819,13 @@ describe('明細列表編輯聯動與完整編輯流程測試 (TransactionList &
           expect(dateAndAmountBox?.className).toContain('flex-col');
           expect(dateAndAmountBox?.textContent).toMatch(/2026-11/);
         }
+
+        // 4. 收入分類應位於來源名稱上方，並採垂直排列
+        const incHeaderSpans = Array.from(incCard.querySelectorAll('.flex-col > span'));
+        expect(incHeaderSpans.length).toBeGreaterThanOrEqual(2);
+        expect(incHeaderSpans[0].textContent?.trim()).toBe('薪資');
+        expect(incHeaderSpans[1].textContent?.trim()).toBe('短來源');
+        expect(incHeaderSpans[0].parentElement?.className).toContain('flex-col');
       } finally {
         cleanup();
       }
