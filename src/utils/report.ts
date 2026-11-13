@@ -2,7 +2,7 @@
  * @file report.ts
  * @description Sanddollar 財務報表與視覺化圖表資料轉換核心模組
  * 提供財務摘要統計 (calculateFinancialSummary)、分類圓餅圖資料轉換 (generateCategoryPieData)
- * 以及 0 軸上下堆疊長條圖資料集產生 (generateStackedBarData)，嚴格保證型別安全與防禦性邊界處理。
+ * 以及並排雙柱堆疊長條圖資料集產生 (generateStackedBarData)，嚴格保證型別安全與防禦性邊界處理。
  */
 
 import type { ExpenseRecord, IncomeRecord, MonthlyReward, FinancialSummary } from '@/types';
@@ -26,6 +26,8 @@ export interface StackedBarDataset {
   data: number[];
   backgroundColor: string;
   stack: string;
+  /** 資料類型標記，供前端圖例分組渲染使用 */
+  categoryType?: 'income' | 'reward' | 'expense';
 }
 
 /**
@@ -152,12 +154,29 @@ const DEFAULT_PALETTE: string[] = [
 ];
 
 /**
+ * 收入與回饋冷色系調色盤（藍、綠、青、靛青）
+ */
+const INCOME_PALETTE: string[] = [
+  '#0F766E', '#0284C7', '#16A34A', '#0D9488',
+  '#2563EB', '#059669', '#0891B2', '#4F46E5',
+];
+
+/**
+ * 支出暖色系調色盤（紅、橘、琥珀、玫瑰、紫）
+ */
+const EXPENSE_PALETTE: string[] = [
+  '#DC2626', '#EA580C', '#D97706', '#E11D48',
+  '#9333EA', '#C2410C', '#B91C1C', '#BE185D',
+];
+
+/**
  * 取得指定索引的顏色（支援超過調色盤長度時輪替）
  * @param index 索引值
+ * @param palette 指定調色盤（預設為 DEFAULT_PALETTE）
  * @returns 顏色 Hex 字串
  */
-function getColor(index: number): string {
-  return DEFAULT_PALETTE[index % DEFAULT_PALETTE.length];
+function getColor(index: number, palette: string[] = DEFAULT_PALETTE): string {
+  return palette[index % palette.length];
 }
 
 /**
@@ -276,11 +295,10 @@ export function generateCategoryPieData(
 }
 
 /**
- * 產生 0 軸正負堆疊長條圖資料
- * - 支出分類呈現為正數 (0 軸上方)
- * - 收入分類與回饋呈現為負數 (0 軸下方)
- * - 所有 dataset 的 stack 均為 'balance'
- * 
+ * 產生並排雙柱堆疊長條圖資料 (每月收支堆疊長條圖)
+ * - 左柱 (stack: 'income')：收入分類 (label: '收入 - <分類>') 與每月回饋 (label: '每月回饋')，皆為正數 (>= 0)，採用冷色系
+ * - 右柱 (stack: 'expense')：支出分類 (label: '支出 - <分類>')，皆為正數 (>= 0)，採用暖色系
+ *
  * @param expenses 消費支出記錄列表
  * @param incomes 收入記錄列表
  * @param rewards 每月回饋記錄列表
@@ -307,9 +325,52 @@ export function generateStackedBarData(
   }
 
   const datasets: StackedBarDataset[] = [];
-  let colorIndex = 0;
+  let incomeColorIndex = 0;
+  let expenseColorIndex = 0;
 
-  // 1. 收集並統計所有支出分類 (依月份加總 item.subtotal 為正數)
+  // 1. 收集並統計所有收入分類 (左柱 stack: 'income'，數值 >= 0，冷色系)
+  const incomeCategories = new Set<string>();
+  for (const inc of incomes) {
+    const cat = inc.category?.trim() || '其他';
+    incomeCategories.add(cat);
+  }
+
+  for (const cat of incomeCategories) {
+    const monthData = targetMonths.map((m) => {
+      const matchingIncomes = incomes.filter(
+        (inc) => inc.date?.startsWith(m) && (inc.category?.trim() || '其他') === cat
+      );
+      const sum = matchingIncomes.reduce((acc, inc) => acc + (inc.amount || 0), 0);
+      return sum > 0 ? sum : 0;
+    });
+
+    datasets.push({
+      label: `收入 - ${cat}`,
+      data: monthData,
+      backgroundColor: getColor(incomeColorIndex++, INCOME_PALETTE),
+      stack: 'income',
+      categoryType: 'income',
+    });
+  }
+
+  // 2. 處理每月回饋 (若有回饋記錄，獨立加到左柱 stack: 'income'，數值 >= 0，冷色系)
+  if (rewards && rewards.length > 0) {
+    const rewardMonthData = targetMonths.map((m) => {
+      const matchingRewards = rewards.filter((r) => r.yearMonth?.startsWith(m));
+      const sum = matchingRewards.reduce((acc, rew) => acc + (rew.amount || 0), 0);
+      return sum > 0 ? sum : 0;
+    });
+
+    datasets.push({
+      label: '每月回饋',
+      data: rewardMonthData,
+      backgroundColor: getColor(incomeColorIndex++, INCOME_PALETTE),
+      stack: 'income',
+      categoryType: 'reward',
+    });
+  }
+
+  // 3. 收集並統計所有支出分類 (右柱 stack: 'expense'，數值 >= 0，暖色系)
   const expenseCategories = new Set<string>();
   for (const exp of expenses) {
     if (exp.items) {
@@ -322,7 +383,6 @@ export function generateStackedBarData(
 
   for (const cat of expenseCategories) {
     const monthData = targetMonths.map((m) => {
-      // 篩選屬於該月份的消費記錄
       const matchingExpenses = expenses.filter((e) => e.date?.startsWith(m));
       let sum = 0;
       for (const exp of matchingExpenses) {
@@ -334,55 +394,15 @@ export function generateStackedBarData(
           }
         }
       }
-      return sum;
+      return sum > 0 ? sum : 0;
     });
 
     datasets.push({
-      label: cat,
+      label: `支出 - ${cat}`,
       data: monthData,
-      backgroundColor: getColor(colorIndex++),
-      stack: 'balance',
-    });
-  }
-
-  // 2. 收集並統計所有收入分類 (依月份加總 income.amount 為負數 <= 0)
-  const incomeCategories = new Set<string>();
-  for (const inc of incomes) {
-    const cat = inc.category?.trim() || '其他';
-    incomeCategories.add(cat);
-  }
-
-  for (const cat of incomeCategories) {
-    const monthData = targetMonths.map((m) => {
-      // 篩選屬於該月份的收入記錄
-      const matchingIncomes = incomes.filter(
-        (inc) => inc.date?.startsWith(m) && (inc.category?.trim() || '其他') === cat
-      );
-      const sum = matchingIncomes.reduce((acc, inc) => acc + (inc.amount || 0), 0);
-      return sum > 0 ? -sum : 0;
-    });
-
-    datasets.push({
-      label: cat,
-      data: monthData,
-      backgroundColor: getColor(colorIndex++),
-      stack: 'balance',
-    });
-  }
-
-  // 3. 處理每月回饋 (若有回饋記錄，獨立加到 datasets，數值為負數 <= 0)
-  if (rewards && rewards.length > 0) {
-    const rewardMonthData = targetMonths.map((m) => {
-      const matchingRewards = rewards.filter((r) => r.yearMonth?.startsWith(m));
-      const sum = matchingRewards.reduce((acc, rew) => acc + (rew.amount || 0), 0);
-      return sum > 0 ? -sum : 0;
-    });
-
-    datasets.push({
-      label: '回饋',
-      data: rewardMonthData,
-      backgroundColor: getColor(colorIndex++),
-      stack: 'balance',
+      backgroundColor: getColor(expenseColorIndex++, EXPENSE_PALETTE),
+      stack: 'expense',
+      categoryType: 'expense',
     });
   }
 
