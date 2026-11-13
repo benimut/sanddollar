@@ -811,6 +811,13 @@ describe('明細列表編輯聯動與完整編輯流程測試 (TransactionList &
           expect(deleteBtn!.querySelector('svg')).toBeTruthy();
           expect(editBtn!.getAttribute('aria-label')).toBeTruthy();
           expect(deleteBtn!.getAttribute('aria-label')).toBeTruthy();
+
+          // 3. 日期與總金額垂直排列（同處於 flex-col 容器內）
+          const amountEl = card.querySelector('.text-sm.font-extrabold');
+          expect(amountEl).toBeTruthy();
+          const dateAndAmountBox = amountEl!.parentElement;
+          expect(dateAndAmountBox?.className).toContain('flex-col');
+          expect(dateAndAmountBox?.textContent).toMatch(/2026-11/);
         }
       } finally {
         cleanup();

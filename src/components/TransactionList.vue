@@ -475,19 +475,16 @@ function formatAmount(num: number): string {
         class="bg-white rounded-xl p-3.5 border border-slate-100 border-l-4 shadow-sm flex items-center gap-3"
         :class="tx.accentBorderClass"
       >
-        <!-- 左側：商店/來源名稱、日期、商品明細與備註 -->
+        <!-- 左側：商店/來源名稱、商品明細與備註 -->
         <div class="flex-1 min-w-0 space-y-1">
-          <div class="flex items-center justify-between gap-2">
-            <div class="flex items-center gap-1.5 min-w-0">
-              <span class="text-xs font-bold text-slate-800 truncate" :title="tx.title">{{ tx.title }}</span>
-              <span
-                v-if="tx.categoryBadge"
-                class="text-[11px] bg-slate-100 text-slate-600 px-1.5 py-0.5 rounded shrink-0"
-              >
-                {{ tx.categoryBadge }}
-              </span>
-            </div>
-            <span class="text-[11px] text-slate-400 tabular-nums shrink-0">{{ tx.dateLabel }}</span>
+          <div class="flex items-center gap-1.5 min-w-0">
+            <span class="text-xs font-bold text-slate-800 truncate" :title="tx.title">{{ tx.title }}</span>
+            <span
+              v-if="tx.categoryBadge"
+              class="text-[11px] bg-slate-100 text-slate-600 px-1.5 py-0.5 rounded shrink-0"
+            >
+              {{ tx.categoryBadge }}
+            </span>
           </div>
 
           <!-- 商品明細展示（一筆一行，最多顯示前三筆，超過顯示 ...） -->
@@ -501,8 +498,9 @@ function formatAmount(num: number): string {
           <p v-if="tx.note" class="text-[11px] text-slate-400 italic truncate">備註：{{ tx.note }}</p>
         </div>
 
-        <!-- 中右：金額（靠右對齊且不換行） -->
-        <div class="shrink-0 text-right min-w-[88px] tabular-nums">
+        <!-- 中右：日期與總金額垂直排列（靠右對齊） -->
+        <div class="flex flex-col items-end justify-center gap-0.5 shrink-0 text-right min-w-[88px] tabular-nums">
+          <span class="text-[11px] text-slate-400">{{ tx.dateLabel }}</span>
           <span class="text-sm font-extrabold whitespace-nowrap" :class="tx.amountClass">
             {{ tx.amountText }}<span v-if="tx.type === 'expense' && selectedCategory" class="block text-[11px] font-normal text-rose-500">({{ selectedCategory }})</span>
           </span>
