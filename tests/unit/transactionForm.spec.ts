@@ -1401,7 +1401,17 @@ describe('Milestone 5: TransactionForm 模組化拆分與歷史選單單元測�
           const foreignAmountInput = container.querySelector('#foreign-expense-amount') as HTMLInputElement | null;
           expect(foreignAmountInput, '海外模式下應存在 #foreign-expense-amount 外幣金額輸入框').not.toBeNull();
 
-          // 2. 使用者在未填寫商品明細（商品單價預設為 0，商品小計為 0）時，手填外幣金額 100
+          // 2. 使用者在商品小計為 0（僅填品名與分類、單價為 0）時，手填外幣金額 100
+          const itemNameInput = container.querySelector('#expense-name') as HTMLInputElement;
+          itemNameInput.value = '贈品';
+          itemNameInput.dispatchEvent(new Event('input'));
+          const itemCatSelect = container.querySelector('#expense-category') as HTMLSelectElement;
+          if (itemCatSelect && itemCatSelect.options.length > 0) {
+            itemCatSelect.value = itemCatSelect.options[0].value;
+            itemCatSelect.dispatchEvent(new Event('change'));
+          }
+          await flushAsync();
+
           foreignAmountInput!.value = '100';
           foreignAmountInput!.dispatchEvent(new Event('input'));
           await flushAsync();
@@ -1694,6 +1704,355 @@ describe('Milestone 5: TransactionForm 模組化拆分與歷史選單單元測�
         await flushAsync();
 
         expect(selectSpy).toHaveBeenCalled();
+      } finally {
+        cleanup();
+      }
+    });
+  });
+
+  describe('折扣分類設定測試 (ExpenseForm)', () => {
+    it('點擊 + 新增折扣 後應顯示折扣分類選單 (#disc-cat-0)，預設非「其他」且儲存時應帶入所選分類', async () => {
+      vi.mocked(dbModule.getCategories).mockResolvedValueOnce([
+        { id: 1, name: '餐飲', type: 'expense', isDefault: true, sortOrder: 1 },
+        { id: 2, name: '日用品', type: 'expense', isDefault: false, sortOrder: 2 },
+      ]);
+
+      const { container, cleanup } = mountComponent(ExpenseForm);
+      await flushAsync();
+
+      try {
+        // 先填寫第一項商品與分類
+        const nameInput = container.querySelector('#expense-name') as HTMLInputElement;
+        const priceInput = container.querySelector('#expense-amount') as HTMLInputElement;
+        const catSelect = container.querySelector('#expense-category') as HTMLSelectElement;
+        nameInput.value = '衛生紙';
+        nameInput.dispatchEvent(new Event('input'));
+        priceInput.value = '200';
+        priceInput.dispatchEvent(new Event('input'));
+        catSelect.value = '餐飲';
+        catSelect.dispatchEvent(new Event('change'));
+        await flushAsync();
+
+        // 點擊 + 新增折扣
+        const buttons = Array.from(container.querySelectorAll('button'));
+        const addDiscBtn = buttons.find((b) => b.textContent?.includes('新增折扣')) as HTMLButtonElement;
+        expect(addDiscBtn).toBeTruthy();
+        addDiscBtn.click();
+        await flushAsync();
+
+        const discCatSelect = container.querySelector('#disc-cat-0') as HTMLSelectElement | null;
+        expect(discCatSelect, '應渲染折扣分類選單 #disc-cat-0').not.toBeNull();
+        expect(discCatSelect!.value).not.toBe('其他');
+        expect(discCatSelect!.value).toBeTruthy();
+
+        // 切換折扣分類為餐飲並填寫折扣名稱與金額
+        discCatSelect!.value = '餐飲';
+        discCatSelect!.dispatchEvent(new Event('change'));
+        const discNameInput = container.querySelector('#disc-name-0') as HTMLInputElement;
+        const discAmountInput = container.querySelector('#disc-amount-0') as HTMLInputElement;
+        discNameInput.value = '滿額折扣';
+        discNameInput.dispatchEvent(new Event('input'));
+        discAmountInput.value = '30';
+        discAmountInput.dispatchEvent(new Event('input'));
+        await flushAsync();
+
+        // 送出表單
+        const submitBtn = container.querySelector('#btn-submit-expense') as HTMLButtonElement;
+        submitBtn.click();
+        await flushAsync();
+
+        expect(dbModule.addExpense).toHaveBeenCalledTimes(1);
+        const savedRecord = vi.mocked(dbModule.addExpense).mock.calls[0][0];
+        const discItem = savedRecord.items.find((it) => it.type === 'discount');
+        expect(discItem).toBeDefined();
+        expect(discItem!.category).toBe('餐飲');
+        expect(discItem!.subtotal).toBe(-30);
+      } finally {
+        cleanup();
+      }
+    });
+  });
+
+  describe('折扣新增限制與分類連動測試 (ExpenseForm)', () => {
+    it('沒有商品時，「+ 新增折扣」按鈕應禁用且無法新增折扣', async () => {
+      const { container, cleanup } = mountComponent(ExpenseForm);
+      await flushAsync();
+
+      try {
+        const addDiscountBtn = Array.from(container.querySelectorAll('button')).find((b) =>
+          b.textContent?.includes('新增折扣')
+        ) as HTMLButtonElement;
+        expect(addDiscountBtn, '應存在新增折扣按鈕').toBeDefined();
+        expect(addDiscountBtn.disabled, '沒有商品時新增折扣按鈕應為 disabled').toBe(true);
+
+        addDiscountBtn.click();
+        await flushAsync();
+
+        expect(container.querySelector('#disc-name-0')).toBeNull();
+      } finally {
+        cleanup();
+      }
+    });
+
+    it('有填寫商品但都沒有分類時，「+ 新增折扣」按鈕應禁用且無法新增折扣', async () => {
+      const { container, cleanup } = mountComponent(ExpenseForm);
+      await flushAsync();
+
+      try {
+        const itemNameInput = container.querySelector('#expense-name') as HTMLInputElement;
+        itemNameInput.value = '拿鐵咖啡';
+        itemNameInput.dispatchEvent(new Event('input'));
+
+        const itemPriceInput = container.querySelector('#expense-amount') as HTMLInputElement;
+        itemPriceInput.value = '120';
+        itemPriceInput.dispatchEvent(new Event('input'));
+
+        // 將商品分類切換為「+ 新增分類...」以清除商品分類（模擬無分類狀態）
+        const itemCatSelect = container.querySelector('#expense-category') as HTMLSelectElement;
+        itemCatSelect.value = '__add_new__';
+        itemCatSelect.dispatchEvent(new Event('change'));
+        await flushAsync();
+
+        const addDiscountBtn = Array.from(container.querySelectorAll('button')).find((b) =>
+          b.textContent?.includes('新增折扣')
+        ) as HTMLButtonElement;
+        expect(addDiscountBtn.disabled, '商品都沒有分類時新增折扣按鈕應為 disabled').toBe(true);
+
+        addDiscountBtn.click();
+        await flushAsync();
+
+        expect(container.querySelector('#disc-name-0')).toBeNull();
+      } finally {
+        cleanup();
+      }
+    });
+
+    it('折扣分類只能從同筆支出的有效商品有的分類裡選，且隨商品分類變動同步', async () => {
+      vi.mocked(dbModule.getCategories).mockResolvedValueOnce([
+        { id: 1, name: '餐飲', type: 'expense', isDefault: true, sortOrder: 1 },
+        { id: 2, name: '購物', type: 'expense', isDefault: true, sortOrder: 2 },
+        { id: 3, name: '交通', type: 'expense', isDefault: true, sortOrder: 3 },
+      ]);
+      const { container, cleanup } = mountComponent(ExpenseForm);
+      await flushAsync();
+
+      try {
+        // 第 1 個商品：餐飲
+        const name0 = container.querySelector('#expense-name') as HTMLInputElement;
+        name0.value = '美式咖啡';
+        name0.dispatchEvent(new Event('input'));
+        const cat0 = container.querySelector('#expense-category') as HTMLSelectElement;
+        cat0.value = '餐飲';
+        cat0.dispatchEvent(new Event('change'));
+        await flushAsync();
+
+        // 新增第 2 個商品：購物（未使用的「交通」不應出現在折扣分類選項中）
+        const addItemBtn = container.querySelector('#btn-add-item') as HTMLButtonElement;
+        addItemBtn.click();
+        await flushAsync();
+
+        const name1 = container.querySelector('#item-name-1') as HTMLInputElement;
+        name1.value = '環保袋';
+        name1.dispatchEvent(new Event('input'));
+        const cat1 = container.querySelector('#item-cat-1') as HTMLSelectElement;
+        cat1.value = '購物';
+        cat1.dispatchEvent(new Event('change'));
+        await flushAsync();
+
+        // 現在應該可以新增折扣
+        const addDiscountBtn = Array.from(container.querySelectorAll('button')).find((b) =>
+          b.textContent?.includes('新增折扣')
+        ) as HTMLButtonElement;
+        expect(addDiscountBtn.disabled).toBe(false);
+
+        addDiscountBtn.click();
+        await flushAsync();
+
+        const discCatSelect = container.querySelector('#disc-cat-0') as HTMLSelectElement | null;
+        expect(discCatSelect, '應存在折扣分類選單 #disc-cat-0').not.toBeNull();
+
+        const optionValues = Array.from(discCatSelect!.options).map((o) => o.value);
+        expect(optionValues).toEqual(['餐飲', '購物']);
+        expect(optionValues).not.toContain('交通');
+        expect(discCatSelect!.value).toBe('餐飲');
+
+        // 切換折扣分類為「購物」
+        discCatSelect!.value = '購物';
+        discCatSelect!.dispatchEvent(new Event('change'));
+        await flushAsync();
+        expect(discCatSelect!.value).toBe('購物');
+
+        // 將第 2 個商品的品名清空（使其不再是有效商品），選了「購物」的折扣應被直接刪除
+        name1.value = '';
+        name1.dispatchEvent(new Event('input'));
+        await flushAsync();
+
+        expect(container.querySelector('#disc-cat-0')).toBeNull();
+        expect(addDiscountBtn.disabled).toBe(false);
+
+        // 將第 1 個商品的品名也清空（無有效商品），新增折扣按鈕應再次禁用
+        name0.value = '';
+        name0.dispatchEvent(new Event('input'));
+        await flushAsync();
+
+        expect(addDiscountBtn.disabled).toBe(true);
+      } finally {
+        cleanup();
+      }
+    });
+
+    it('設定商品名稱與分類並新增折扣後，將商品分類改為「+ 新增分類...」時應自動刪除現有折抵項目', async () => {
+      const { container, cleanup } = mountComponent(ExpenseForm);
+      await flushAsync();
+
+      try {
+        const name0 = container.querySelector('#expense-name') as HTMLInputElement;
+        name0.value = '美式咖啡';
+        name0.dispatchEvent(new Event('input'));
+
+        const cat0 = container.querySelector('#expense-category') as HTMLSelectElement;
+        cat0.value = '餐飲';
+        cat0.dispatchEvent(new Event('change'));
+        await flushAsync();
+
+        const addDiscountBtn = Array.from(container.querySelectorAll('button')).find((b) =>
+          b.textContent?.includes('新增折扣')
+        ) as HTMLButtonElement;
+        expect(addDiscountBtn.disabled).toBe(false);
+
+        addDiscountBtn.click();
+        await flushAsync();
+
+        expect(container.querySelector('#disc-cat-0')).not.toBeNull();
+
+        // 將商品分類改為「+ 新增分類...」
+        cat0.value = '__add_new__';
+        cat0.dispatchEvent(new Event('change'));
+        await flushAsync();
+
+        // 折抵項目 1 應被刪除，且新增折扣按鈕應禁用
+        expect(container.querySelector('#disc-cat-0')).toBeNull();
+        expect(container.querySelector('#disc-name-0')).toBeNull();
+        expect(addDiscountBtn.disabled).toBe(true);
+      } finally {
+        cleanup();
+      }
+    });
+
+    it('各分類折扣總額不得超過該分類商品小計，超額輸入或商品金額下降時自動截斷', async () => {
+      vi.mocked(dbModule.getCategories).mockResolvedValueOnce([
+        { id: 1, name: '餐飲', type: 'expense', isDefault: true, sortOrder: 1 },
+        { id: 2, name: '購物', type: 'expense', isDefault: true, sortOrder: 2 },
+      ]);
+      const { container, cleanup } = mountComponent(ExpenseForm);
+      await flushAsync();
+
+      try {
+        // 第 1 個商品：餐飲，數量 2，單價 50 -> 餐飲小計 100
+        const name0 = container.querySelector('#expense-name') as HTMLInputElement;
+        name0.value = '拿鐵';
+        name0.dispatchEvent(new Event('input'));
+        const qty0 = container.querySelector('#item-qty-0') as HTMLInputElement;
+        qty0.value = '2';
+        qty0.dispatchEvent(new Event('input'));
+        const price0 = container.querySelector('#expense-amount') as HTMLInputElement;
+        price0.value = '50';
+        price0.dispatchEvent(new Event('input'));
+        const cat0 = container.querySelector('#expense-category') as HTMLSelectElement;
+        cat0.value = '餐飲';
+        cat0.dispatchEvent(new Event('change'));
+        await flushAsync();
+
+        // 新增第 1 筆折扣（餐飲），輸入 150 -> 應自動截斷為 100
+        const addDiscountBtn = Array.from(container.querySelectorAll('button')).find((b) =>
+          b.textContent?.includes('新增折扣')
+        ) as HTMLButtonElement;
+        addDiscountBtn.click();
+        await flushAsync();
+
+        const discAmt0 = container.querySelector('#disc-amount-0') as HTMLInputElement;
+        discAmt0.value = '150';
+        discAmt0.dispatchEvent(new Event('input'));
+        await flushAsync();
+        expect(discAmt0.value).toBe('100');
+
+        // 調整第 1 筆折扣為 60，再新增第 2 筆同分類折扣，輸入 80 -> 剩餘上限 40，應自動截斷為 40
+        discAmt0.value = '60';
+        discAmt0.dispatchEvent(new Event('input'));
+        await flushAsync();
+
+        addDiscountBtn.click();
+        await flushAsync();
+
+        const discAmt1 = container.querySelector('#disc-amount-1') as HTMLInputElement;
+        discAmt1.value = '80';
+        discAmt1.dispatchEvent(new Event('input'));
+        await flushAsync();
+        expect(discAmt1.value).toBe('40');
+
+        // 將商品單價從 50 降為 35（小計變 70），第 2 筆折扣應自動從 40 截斷為 10
+        price0.value = '35';
+        price0.dispatchEvent(new Event('input'));
+        await flushAsync();
+        expect(discAmt0.value).toBe('60');
+        expect(discAmt1.value).toBe('10');
+      } finally {
+        cleanup();
+      }
+    });
+
+    it('編輯舊記錄時若舊折扣分類不在商品分類內，仍保留於該筆折扣下拉選單供修改', async () => {
+      const mockEditData = {
+        id: 88,
+        date: '2026-11-10',
+        merchant: '測試商店',
+        paymentMethod: '現金',
+        totalAmount: 90,
+        isForeign: false,
+        items: [
+          {
+            id: 'item-1',
+            type: 'item' as const,
+            name: '拿鐵咖啡',
+            quantity: 1,
+            unitPrice: 100,
+            subtotal: 100,
+            category: '餐飲',
+          },
+          {
+            id: 'disc-1',
+            type: 'discount' as const,
+            name: '舊版折扣',
+            quantity: 1,
+            unitPrice: -10,
+            subtotal: -10,
+            category: '其他',
+          },
+        ],
+        createdAt: 1730818800000,
+        updatedAt: 1730818800000,
+      };
+
+      const { container, cleanup } = mountComponent(ExpenseForm, { editData: mockEditData });
+      await flushAsync();
+
+      try {
+        const discCat0 = container.querySelector('#disc-cat-0') as HTMLSelectElement | null;
+        expect(discCat0, '應保留舊折扣項目及其分類選單').not.toBeNull();
+        const optionValues = Array.from(discCat0!.options).map((o) => o.value);
+        expect(optionValues).toEqual(['餐飲', '其他']);
+        expect(discCat0!.value).toBe('其他');
+
+        // 新增另一筆折扣時，新折扣只能選商品有的分類（不含舊折扣的「其他」）
+        const addDiscountBtn = Array.from(container.querySelectorAll('button')).find((b) =>
+          b.textContent?.includes('新增折扣')
+        ) as HTMLButtonElement;
+        addDiscountBtn.click();
+        await flushAsync();
+
+        const discCat1 = container.querySelector('#disc-cat-1') as HTMLSelectElement | null;
+        expect(discCat1).not.toBeNull();
+        expect(Array.from(discCat1!.options).map((o) => o.value)).toEqual(['餐飲']);
       } finally {
         cleanup();
       }
