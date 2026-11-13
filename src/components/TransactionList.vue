@@ -490,11 +490,12 @@ function formatAmount(num: number): string {
             <span class="text-[11px] text-slate-400 tabular-nums shrink-0">{{ tx.dateLabel }}</span>
           </div>
 
-          <!-- 商品明細展示 -->
-          <div v-if="tx.itemsSummary && tx.itemsSummary.length > 0" class="text-[11px] text-slate-500 truncate">
-            <span v-for="(it, iIdx) in tx.itemsSummary" :key="it.id || iIdx" class="mr-2">
+          <!-- 商品明細展示（一筆一行，最多顯示前三筆，超過顯示 ...） -->
+          <div v-if="tx.itemsSummary && tx.itemsSummary.length > 0" class="text-[11px] text-slate-500 space-y-0.5">
+            <div v-for="(it, iIdx) in tx.itemsSummary.slice(0, 3)" :key="it.id || iIdx" class="truncate">
               {{ it.name }} ({{ it.quantity }}x${{ it.unitPrice }})
-            </span>
+            </div>
+            <div v-if="tx.itemsSummary.length > 3" class="text-slate-400 leading-none">...</div>
           </div>
 
           <p v-if="tx.note" class="text-[11px] text-slate-400 italic truncate">備註：{{ tx.note }}</p>

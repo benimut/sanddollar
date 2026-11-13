@@ -816,5 +816,50 @@ describe('明細列表編輯聯動與完整編輯流程測試 (TransactionList &
         cleanup();
       }
     });
+
+    it('商品明細應一筆一行顯示，最多只顯示前三筆，超過三筆時應顯示 ...', async () => {
+      await addExpense({
+        date: '2026-11-12',
+        merchant: '大賣場',
+        paymentMethod: '現金',
+        items: [
+          { id: 'p1', type: 'item', name: '商品一', quantity: 1, unitPrice: 10, subtotal: 10, category: '生活' },
+          { id: 'p2', type: 'item', name: '商品二', quantity: 2, unitPrice: 20, subtotal: 40, category: '生活' },
+          { id: 'p3', type: 'item', name: '商品三', quantity: 1, unitPrice: 30, subtotal: 30, category: '生活' },
+          { id: 'p4', type: 'item', name: '商品四不應顯示', quantity: 1, unitPrice: 40, subtotal: 40, category: '生活' },
+        ],
+        totalAmount: 120,
+        isForeign: false,
+        createdAt: 1000,
+        updatedAt: 1000,
+      });
+
+      const { container, cleanup } = mountComponent(TransactionList, {
+        initialMonth: '2026-11',
+      });
+
+      try {
+        await flushAsync(100);
+        const card = container.querySelector<HTMLElement>('div.rounded-xl.border-l-rose-500');
+        expect(card).toBeTruthy();
+
+        const cardText = card!.textContent || '';
+        expect(cardText).toContain('商品一 (1x$10)');
+        expect(cardText).toContain('商品二 (2x$20)');
+        expect(cardText).toContain('商品三 (1x$30)');
+        expect(cardText).not.toContain('商品四不應顯示');
+        expect(cardText).toContain('...');
+
+        // 確認商品明細為一筆一行（各自獨立的 div）
+        const itemLines = Array.from(card!.querySelectorAll('.text-slate-500 > div'));
+        expect(itemLines.length).toBe(4); // 前三筆商品 + "..." 一行
+        expect(itemLines[0].textContent?.trim()).toBe('商品一 (1x$10)');
+        expect(itemLines[1].textContent?.trim()).toBe('商品二 (2x$20)');
+        expect(itemLines[2].textContent?.trim()).toBe('商品三 (1x$30)');
+        expect(itemLines[3].textContent?.trim()).toBe('...');
+      } finally {
+        cleanup();
+      }
+    });
   });
 });
