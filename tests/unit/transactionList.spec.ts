@@ -876,4 +876,169 @@ describe('明細列表編輯聯動與完整編輯流程測試 (TransactionList &
       }
     });
   });
+
+  describe('8. 支付方式篩選功能測試 (Payment Method Filter)', () => {
+    it('應具備 #filter-payment-method 下拉選單，並彙整資料庫與歷史支出之支付方式選項', async () => {
+      const { addPaymentMethod } = await import('@/db');
+      await addPaymentMethod('街口支付');
+      await addPaymentMethod('現金');
+
+      await addExpense({
+        date: '2026-11-10',
+        merchant: '星巴克',
+        paymentMethod: '信用卡',
+        items: [
+          { id: 'pm-1', type: 'item', name: '拿鐵', category: '餐飲', quantity: 1, unitPrice: 150, subtotal: 150 },
+        ],
+        totalAmount: 150,
+        isForeign: false,
+        createdAt: 1000,
+        updatedAt: 1000,
+      });
+
+      const { container, cleanup } = mountComponent(TransactionList, {
+        initialMonth: '2026-11',
+      });
+
+      try {
+        await flushAsync(100);
+        const pmFilter = container.querySelector<HTMLSelectElement>('#filter-payment-method');
+        expect(pmFilter, '明細列表應包含 #filter-payment-method 支付方式下拉選單').not.toBeNull();
+
+        const options = Array.from(pmFilter!.querySelectorAll('option')).map((opt) => opt.value);
+        expect(options).toContain('');
+        expect(options).toContain('街口支付');
+        expect(options).toContain('現金');
+        expect(options).toContain('信用卡');
+      } finally {
+        cleanup();
+      }
+    });
+
+    it('選擇特定支付方式時，應僅顯示該支付方式之支出並排除收入與回饋，且統計金額同步更新', async () => {
+      await addExpense({
+        date: '2026-11-10',
+        merchant: '星巴克',
+        paymentMethod: '信用卡',
+        items: [
+          { id: 'pm-2', type: 'item', name: '拿鐵', category: '餐飲', quantity: 1, unitPrice: 150, subtotal: 150 },
+        ],
+        totalAmount: 150,
+        isForeign: false,
+        createdAt: 1000,
+        updatedAt: 1000,
+      });
+
+      await addExpense({
+        date: '2026-11-11',
+        merchant: '7-11',
+        paymentMethod: '現金',
+        items: [
+          { id: 'pm-3', type: 'item', name: '御飯糰', category: '餐飲', quantity: 1, unitPrice: 45, subtotal: 45 },
+        ],
+        totalAmount: 45,
+        isForeign: false,
+        createdAt: 2000,
+        updatedAt: 2000,
+      });
+
+      await addIncome({
+        date: '2026-11-05',
+        source: '十一月薪資',
+        category: '薪資',
+        amount: 50000,
+        isForeign: false,
+        createdAt: 1500,
+        updatedAt: 1500,
+      });
+
+      await addReward({
+        yearMonth: '2026-11',
+        sourceName: '信用卡回饋',
+        amount: 200,
+        createdAt: 1600,
+      });
+
+      const { container, cleanup } = mountComponent(TransactionList, {
+        initialMonth: '2026-11',
+      });
+
+      try {
+        await flushAsync(100);
+
+        const pmFilter = container.querySelector<HTMLSelectElement>('#filter-payment-method');
+        expect(pmFilter).not.toBeNull();
+
+        pmFilter!.value = '信用卡';
+        pmFilter!.dispatchEvent(new Event('change'));
+        await flushAsync(50);
+
+        const content = container.textContent || '';
+        expect(content).toContain('星巴克');
+        expect(content).not.toContain('7-11');
+        expect(content).not.toContain('十一月薪資');
+        expect(content).not.toContain('信用卡回饋');
+        expect(content).toContain('NT$ 150');
+        expect(content).toContain('NT$ 0');
+      } finally {
+        cleanup();
+      }
+    });
+
+    it('支付方式篩選可與分類篩選及關鍵字搜尋同時組合使用', async () => {
+      await addExpense({
+        date: '2026-11-10',
+        merchant: '全聯福利中心',
+        paymentMethod: 'LINE Pay',
+        items: [
+          { id: 'pm-4', type: 'item', name: '鮮奶', category: '餐飲', quantity: 1, unitPrice: 90, subtotal: 90 },
+          { id: 'pm-5', type: 'item', name: '洗碗精', category: '生活', quantity: 1, unitPrice: 120, subtotal: 120 },
+        ],
+        totalAmount: 210,
+        isForeign: false,
+        createdAt: 1000,
+        updatedAt: 1000,
+      });
+
+      await addExpense({
+        date: '2026-11-12',
+        merchant: '家樂福',
+        paymentMethod: 'LINE Pay',
+        items: [
+          { id: 'pm-6', type: 'item', name: '衛生紙', category: '生活', quantity: 1, unitPrice: 300, subtotal: 300 },
+        ],
+        totalAmount: 300,
+        isForeign: false,
+        createdAt: 2000,
+        updatedAt: 2000,
+      });
+
+      const { container, cleanup } = mountComponent(TransactionList, {
+        initialMonth: '2026-11',
+      });
+
+      try {
+        await flushAsync(100);
+
+        const pmFilter = container.querySelector<HTMLSelectElement>('#filter-payment-method')!;
+        const catFilter = container.querySelector<HTMLSelectElement>('#filter-category')!;
+        const kwFilter = container.querySelector<HTMLInputElement>('#filter-keyword')!;
+
+        pmFilter.value = 'LINE Pay';
+        pmFilter.dispatchEvent(new Event('change'));
+        catFilter.value = '生活';
+        catFilter.dispatchEvent(new Event('change'));
+        kwFilter.value = '全聯';
+        kwFilter.dispatchEvent(new Event('input'));
+        await flushAsync(50);
+
+        const content = container.textContent || '';
+        expect(content).toContain('全聯福利中心');
+        expect(content).not.toContain('家樂福');
+        expect(content).toContain('NT$ 120');
+      } finally {
+        cleanup();
+      }
+    });
+  });
 });
