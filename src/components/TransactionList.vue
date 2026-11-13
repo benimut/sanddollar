@@ -17,6 +17,7 @@ import {
   getIncomes,
   getRewards,
   getCategories,
+  getPaymentMethods,
   deleteExpense,
   deleteIncome,
   deleteReward,
@@ -50,8 +51,10 @@ watch(
 
 // 篩選與搜尋狀態
 const selectedCategory = ref<string>('');
+const selectedPaymentMethod = ref<string>('');
 const searchKeyword = ref<string>('');
 const dbCategories = ref<string[]>([]);
+const dbPaymentMethods = ref<string[]>([]);
 
 // 資料狀態
 const expenses = ref<ExpenseRecord[]>([]);
@@ -60,21 +63,23 @@ const rewards = ref<MonthlyReward[]>([]);
 const isLoading = ref(false);
 
 /**
- * 載入所有資料庫記錄與分類清單
+ * 載入所有資料庫記錄與分類、支付方式清單
  */
 async function loadData() {
   isLoading.value = true;
   try {
-    const [expList, incList, rewList, catList] = await Promise.all([
+    const [expList, incList, rewList, catList, pmList] = await Promise.all([
       getExpenses(),
       getIncomes(),
       getRewards(),
       getCategories(),
+      getPaymentMethods(),
     ]);
     expenses.value = expList;
     incomes.value = incList;
     rewards.value = rewList;
     dbCategories.value = catList.map((c) => c.name);
+    dbPaymentMethods.value = pmList;
   } finally {
     isLoading.value = false;
   }
@@ -106,7 +111,21 @@ const filterCategories = computed(() => {
 });
 
 /**
- * 當月過濾後之支出清單（結合月份、分類與關鍵字搜尋，並依日期及寫入順序降冪排序）
+ * 彙整歷史記錄與資料庫中所有可用之支付方式名稱（去重清單）
+ */
+const filterPaymentMethods = computed(() => {
+  const set = new Set<string>();
+  for (const pm of dbPaymentMethods.value) {
+    if (pm) set.add(pm);
+  }
+  for (const exp of expenses.value) {
+    if (exp.paymentMethod) set.add(exp.paymentMethod);
+  }
+  return sortStringsNaturally(Array.from(set));
+});
+
+/**
+ * 當月過濾後之支出清單（結合月份、分類、支付方式與關鍵字搜尋，並依日期及寫入順序降冪排序）
  */
 const currentMonthExpenses = computed(() => {
   return expenses.value
@@ -120,7 +139,12 @@ const currentMonthExpenses = computed(() => {
         if (!matchCat) return false;
       }
 
-      // 3. 關鍵字搜尋 (店家、品項、備註)
+      // 3. 支付方式過濾
+      if (selectedPaymentMethod.value && e.paymentMethod !== selectedPaymentMethod.value) {
+        return false;
+      }
+
+      // 4. 關鍵字搜尋 (店家、品項、備註)
       if (searchKeyword.value.trim()) {
         const kw = searchKeyword.value.trim().toLowerCase();
         const matchMerchant = e.merchant?.toLowerCase().includes(kw);
@@ -135,7 +159,7 @@ const currentMonthExpenses = computed(() => {
 });
 
 /**
- * 當月過濾後之收入清單（結合月份、分類與關鍵字搜尋，並依日期及寫入順序降冪排序）
+ * 當月過濾後之收入清單（結合月份、分類、支付方式與關鍵字搜尋，並依日期及寫入順序降冪排序）
  */
 const currentMonthIncomes = computed(() => {
   return incomes.value
@@ -148,7 +172,10 @@ const currentMonthIncomes = computed(() => {
         return false;
       }
 
-      // 3. 關鍵字搜尋 (來源、分類、備註)
+      // 3. 支付方式過濾 (收入無特定支付方式，若有選擇特定支付方式則排除)
+      if (selectedPaymentMethod.value) return false;
+
+      // 4. 關鍵字搜尋 (來源、分類、備註)
       if (searchKeyword.value.trim()) {
         const kw = searchKeyword.value.trim().toLowerCase();
         const matchSource = i.source?.toLowerCase().includes(kw);
@@ -163,7 +190,7 @@ const currentMonthIncomes = computed(() => {
 });
 
 /**
- * 當月過濾後之回饋清單（結合月份、分類與關鍵字搜尋，並依年月及寫入順序降冪排序）
+ * 當月過濾後之回饋清單（結合月份、分類、支付方式與關鍵字搜尋，並依年月及寫入順序降冪排序）
  */
 const currentMonthRewards = computed(() => {
   return rewards.value
@@ -174,7 +201,10 @@ const currentMonthRewards = computed(() => {
       // 2. 分類過濾 (回饋無特定分類，若有選擇特定分類則排除)
       if (selectedCategory.value) return false;
 
-      // 3. 關鍵字搜尋 (來源、備註)
+      // 3. 支付方式過濾 (回饋無特定支付方式，若有選擇特定支付方式則排除)
+      if (selectedPaymentMethod.value) return false;
+
+      // 4. 關鍵字搜尋 (來源、備註)
       if (searchKeyword.value.trim()) {
         const kw = searchKeyword.value.trim().toLowerCase();
         const matchSource = r.sourceName?.toLowerCase().includes(kw);
@@ -432,12 +462,13 @@ function formatAmount(num: number): string {
         </div>
       </div>
 
-      <!-- 分類篩選與關鍵字搜尋列 -->
+      <!-- 分類、支付方式篩選與關鍵字搜尋列 -->
       <div class="grid grid-cols-2 gap-2 pt-2 border-t border-slate-100">
         <div>
           <select
             id="filter-category"
             v-model="selectedCategory"
+            aria-label="篩選分類"
             class="w-full text-xs border border-slate-200 rounded-lg p-2 focus:ring-2 focus:ring-teal-500 focus:outline-none"
           >
             <option value="">全部分類</option>
@@ -447,6 +478,19 @@ function formatAmount(num: number): string {
           </select>
         </div>
         <div>
+          <select
+            id="filter-payment-method"
+            v-model="selectedPaymentMethod"
+            aria-label="篩選支付方式"
+            class="w-full text-xs border border-slate-200 rounded-lg p-2 focus:ring-2 focus:ring-teal-500 focus:outline-none"
+          >
+            <option value="">全部支付方式</option>
+            <option v-for="pm in filterPaymentMethods" :key="pm" :value="pm">
+              {{ pm }}
+            </option>
+          </select>
+        </div>
+        <div class="col-span-2">
           <input
             id="filter-keyword"
             v-model="searchKeyword"
