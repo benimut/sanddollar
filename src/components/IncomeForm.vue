@@ -23,6 +23,7 @@ import {
 import { useCategories } from '@/composables/useCategories';
 import { getTodayDateString } from '@/utils/date';
 import { calculateForeignIncome } from '@/utils/currency';
+import { sortStringsNaturally } from '@/utils/sort';
 import type { IncomeRecord } from '@/types';
 
 const props = defineProps<{
@@ -316,9 +317,9 @@ async function handleSaveIncome() {
   } else {
     const newId = await addIncome(record);
 
-    // 若本次有新來源，動態更新歷史來源清單
+    // 若本次有新來源，動態更新歷史來源清單並維持自然文字排序
     if (record.source && !distinctSources.value.includes(record.source)) {
-      distinctSources.value.push(record.source);
+      distinctSources.value = sortStringsNaturally([...distinctSources.value, record.source]);
     }
 
     resetForm();

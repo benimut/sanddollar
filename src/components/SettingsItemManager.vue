@@ -9,7 +9,8 @@
  * 3. 封裝行內即時編輯與取消狀態，向父元件發送 add, update, delete 事件。
  */
 
-import { ref } from 'vue';
+import { ref, computed } from 'vue';
+import { sortByNameNaturally } from '@/utils/sort';
 
 interface ItemRecord {
   id?: number;
@@ -42,6 +43,9 @@ const emit = defineEmits<{
   (e: 'update', payload: { id: number; name: string }): void;
   (e: 'delete', id: number): void;
 }>();
+
+/** 依名稱自然文字排序後之項目清單 */
+const sortedItems = computed(() => sortByNameNaturally(props.items));
 
 /** 新增項目輸入框內容 */
 const newItemName = ref('');
@@ -137,7 +141,7 @@ function handleDelete(id: number) {
     <!-- 項目清單列表 -->
     <div class="space-y-1.5 max-h-56 overflow-y-auto pr-0.5">
       <div
-        v-for="item in items"
+        v-for="item in sortedItems"
         :key="item.id"
         class="flex items-center justify-between p-2 rounded-xl bg-slate-50 border border-slate-100 hover:bg-slate-100/70 transition-colors text-xs"
       >

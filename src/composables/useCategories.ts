@@ -13,6 +13,7 @@
 import { ref, type Ref } from 'vue';
 import type { CategoryType } from '@/types';
 import { getCategories, addCategory } from '@/db';
+import { sortStringsNaturally } from '@/utils/sort';
 
 /**
  * useCategories 參數選項介面
@@ -82,9 +83,9 @@ export function useCategories(
   type: CategoryType,
   options: UseCategoriesOptions = {}
 ): UseCategoriesReturn {
-  // 1. 初始化分類清單（純淨模式：未指定 initialCategories 時預設為空陣列 []）
+  // 1. 初始化分類清單（純淨模式：未指定 initialCategories 時預設為空陣列 []，若有指定則依自然文字排序）
   const defaultList = options.initialCategories
-    ? [...options.initialCategories]
+    ? sortStringsNaturally(options.initialCategories)
     : [];
 
   const categories = ref<string[]>([...defaultList]);
@@ -113,7 +114,7 @@ export function useCategories(
           ...categories.value,
           ...records.map((r) => r.name),
         ]);
-        categories.value = Array.from(merged);
+        categories.value = sortStringsNaturally(Array.from(merged));
       }
     } catch {
       // 讀取異常時靜默降級，維持現有分類
@@ -147,9 +148,9 @@ export function useCategories(
       // 重新從資料庫載入最新分類
       await loadCategories();
 
-      // 保底確保新分類立即存在於 categories 中
+      // 保底確保新分類立即存在於 categories 中並維持自然文字排序
       if (!categories.value.includes(cleanName)) {
-        categories.value.push(cleanName);
+        categories.value = sortStringsNaturally([...categories.value, cleanName]);
       }
 
       // 觸發新增成功回呼

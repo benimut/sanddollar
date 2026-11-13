@@ -625,4 +625,129 @@ describe('明細列表編輯聯動與完整編輯流程測試 (TransactionList &
       }
     });
   });
+
+  describe('6. 明細排序與分類選單自然文字排序測試', () => {
+    it('支出與收入明細應依日期由新到舊排序，日期相同時依寫入順序由後到前排序', async () => {
+      // 寫入不同日期與同日期的多筆支出
+      await addExpense({
+        date: '2026-11-02',
+        merchant: '店家A-1102',
+        paymentMethod: '現金',
+        items: [{ id: 'i1', type: 'item', name: '商品1', quantity: 1, unitPrice: 100, subtotal: 100, category: '餐飲' }],
+        totalAmount: 100,
+        isForeign: false,
+        createdAt: 1000,
+        updatedAt: 1000,
+      });
+      await addExpense({
+        date: '2026-11-05',
+        merchant: '店家B-1105早',
+        paymentMethod: '現金',
+        items: [{ id: 'i2', type: 'item', name: '商品2', quantity: 1, unitPrice: 200, subtotal: 200, category: '餐飲' }],
+        totalAmount: 200,
+        isForeign: false,
+        createdAt: 2000,
+        updatedAt: 2000,
+      });
+      await addExpense({
+        date: '2026-11-05',
+        merchant: '店家C-1105晚',
+        paymentMethod: '現金',
+        items: [{ id: 'i3', type: 'item', name: '商品3', quantity: 1, unitPrice: 300, subtotal: 300, category: '餐飲' }],
+        totalAmount: 300,
+        isForeign: false,
+        createdAt: 3000,
+        updatedAt: 3000,
+      });
+
+      // 寫入同日期與不同日期的收入
+      await addIncome({
+        date: '2026-11-01',
+        source: '來源1-1101',
+        category: '薪資',
+        amount: 1000,
+        isForeign: false,
+        createdAt: 1000,
+        updatedAt: 1000,
+      });
+      await addIncome({
+        date: '2026-11-04',
+        source: '來源2-1104早',
+        category: '兼職',
+        amount: 2000,
+        isForeign: false,
+        createdAt: 2000,
+        updatedAt: 2000,
+      });
+      await addIncome({
+        date: '2026-11-04',
+        source: '來源3-1104晚',
+        category: '兼職',
+        amount: 3000,
+        isForeign: false,
+        createdAt: 3000,
+        updatedAt: 3000,
+      });
+
+      const { container, cleanup } = mountComponent(TransactionList, {
+        initialMonth: '2026-11',
+      });
+
+      try {
+        await flushAsync(100);
+        const text = container.textContent || '';
+
+        // 支出應依 店家C-1105晚 -> 店家B-1105早 -> 店家A-1102 排列
+        const posC = text.indexOf('店家C-1105晚');
+        const posB = text.indexOf('店家B-1105早');
+        const posA = text.indexOf('店家A-1102');
+        expect(posC).toBeGreaterThan(-1);
+        expect(posB).toBeGreaterThan(posC);
+        expect(posA).toBeGreaterThan(posB);
+
+        // 收入應依 來源3-1104晚 -> 來源2-1104早 -> 來源1-1101 排列
+        const inc3 = text.indexOf('來源3-1104晚');
+        const inc2 = text.indexOf('來源2-1104早');
+        const inc1 = text.indexOf('來源1-1101');
+        expect(inc3).toBeGreaterThan(-1);
+        expect(inc2).toBeGreaterThan(inc3);
+        expect(inc1).toBeGreaterThan(inc2);
+      } finally {
+        cleanup();
+      }
+    });
+
+    it('分類篩選下拉選單應依自然文字順序排序', async () => {
+      await addExpense({
+        date: '2026-11-01',
+        merchant: '測試店',
+        paymentMethod: '現金',
+        items: [
+          { id: 'c1', type: 'item', name: 'A', quantity: 1, unitPrice: 10, subtotal: 10, category: '分類10' },
+          { id: 'c2', type: 'item', name: 'B', quantity: 1, unitPrice: 10, subtotal: 10, category: '分類2' },
+          { id: 'c3', type: 'item', name: 'C', quantity: 1, unitPrice: 10, subtotal: 10, category: '分類1' },
+        ],
+        totalAmount: 30,
+        isForeign: false,
+        createdAt: 1000,
+        updatedAt: 1000,
+      });
+
+      const { container, cleanup } = mountComponent(TransactionList, {
+        initialMonth: '2026-11',
+      });
+
+      try {
+        await flushAsync(100);
+        const options = Array.from(
+          container.querySelectorAll<HTMLOptionElement>('#filter-category option')
+        ).map((opt) => opt.value);
+
+        // 第一個是空字串「全部分類」，後續應依自然數字順序排列
+        expect(options).toEqual(['', '分類1', '分類2', '分類10']);
+      } finally {
+        cleanup();
+      }
+    });
+  });
 });

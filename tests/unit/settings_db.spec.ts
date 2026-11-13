@@ -241,8 +241,12 @@ describe('Sand Dollar 設定頁面資料庫 CRUD 與全庫清空單元測試 (se
 
       const records = await getPaymentMethodRecords();
       expect(records.length).toBe(2);
-      expect(records[0]).toMatchObject({ id: 1, name: '信用卡', isDefault: false });
-      expect(records[1]).toMatchObject({ id: 2, name: '行動支付', isDefault: false });
+      expect(records).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ id: 1, name: '信用卡', isDefault: false }),
+          expect.objectContaining({ id: 2, name: '行動支付', isDefault: false }),
+        ])
+      );
     });
 
     it('addPaymentMethod 傳入空白時應自動 Fallback 為「現金」', async () => {
@@ -583,8 +587,12 @@ describe('Sand Dollar 設定頁面資料庫 CRUD 與全庫清空單元測試 (se
 
       const records = await getRewardSourceRecords();
       expect(records.length).toBe(2);
-      expect(records[0]).toMatchObject({ id: 1, name: 'LINE Points', isDefault: false });
-      expect(records[1]).toMatchObject({ id: 2, name: '信用卡現金回饋', isDefault: false });
+      expect(records).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ id: 1, name: 'LINE Points', isDefault: false }),
+          expect.objectContaining({ id: 2, name: '信用卡現金回饋', isDefault: false }),
+        ])
+      );
     });
 
     it('addRewardSource 傳入空字串或純空白時必須拒絕並拋出錯誤，嚴禁 fallback 為「一般回饋」', async () => {

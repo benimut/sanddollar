@@ -21,6 +21,7 @@ import {
   deleteReward,
 } from '@/db';
 import { shiftMonth, getCurrentMonthString } from '@/utils/date';
+import { sortStringsNaturally, compareByDateAndCreatedDesc } from '@/utils/sort';
 import type { ExpenseRecord, IncomeRecord, MonthlyReward, TransactionEditTarget } from '@/types';
 
 const props = withDefaults(
@@ -100,83 +101,89 @@ const filterCategories = computed(() => {
   for (const inc of incomes.value) {
     if (inc.category) set.add(inc.category);
   }
-  return Array.from(set);
+  return sortStringsNaturally(Array.from(set));
 });
 
 /**
- * 當月過濾後之支出清單（結合月份、分類與關鍵字搜尋）
+ * 當月過濾後之支出清單（結合月份、分類與關鍵字搜尋，並依日期及寫入順序降冪排序）
  */
 const currentMonthExpenses = computed(() => {
-  return expenses.value.filter((e) => {
-    // 1. 月份過濾
-    if (!e.date?.startsWith(selectedMonth.value)) return false;
+  return expenses.value
+    .filter((e) => {
+      // 1. 月份過濾
+      if (!e.date?.startsWith(selectedMonth.value)) return false;
 
-    // 2. 分類過濾
-    if (selectedCategory.value) {
-      const matchCat = e.items?.some((it) => it.category === selectedCategory.value);
-      if (!matchCat) return false;
-    }
+      // 2. 分類過濾
+      if (selectedCategory.value) {
+        const matchCat = e.items?.some((it) => it.category === selectedCategory.value);
+        if (!matchCat) return false;
+      }
 
-    // 3. 關鍵字搜尋 (店家、品項、備註)
-    if (searchKeyword.value.trim()) {
-      const kw = searchKeyword.value.trim().toLowerCase();
-      const matchMerchant = e.merchant?.toLowerCase().includes(kw);
-      const matchNote = e.note?.toLowerCase().includes(kw);
-      const matchItems = e.items?.some((it) => it.name?.toLowerCase().includes(kw));
-      if (!matchMerchant && !matchNote && !matchItems) return false;
-    }
+      // 3. 關鍵字搜尋 (店家、品項、備註)
+      if (searchKeyword.value.trim()) {
+        const kw = searchKeyword.value.trim().toLowerCase();
+        const matchMerchant = e.merchant?.toLowerCase().includes(kw);
+        const matchNote = e.note?.toLowerCase().includes(kw);
+        const matchItems = e.items?.some((it) => it.name?.toLowerCase().includes(kw));
+        if (!matchMerchant && !matchNote && !matchItems) return false;
+      }
 
-    return true;
-  });
+      return true;
+    })
+    .sort(compareByDateAndCreatedDesc);
 });
 
 /**
- * 當月過濾後之收入清單（結合月份、分類與關鍵字搜尋）
+ * 當月過濾後之收入清單（結合月份、分類與關鍵字搜尋，並依日期及寫入順序降冪排序）
  */
 const currentMonthIncomes = computed(() => {
-  return incomes.value.filter((i) => {
-    // 1. 月份過濾
-    if (!i.date?.startsWith(selectedMonth.value)) return false;
+  return incomes.value
+    .filter((i) => {
+      // 1. 月份過濾
+      if (!i.date?.startsWith(selectedMonth.value)) return false;
 
-    // 2. 分類過濾
-    if (selectedCategory.value && i.category !== selectedCategory.value) {
-      return false;
-    }
+      // 2. 分類過濾
+      if (selectedCategory.value && i.category !== selectedCategory.value) {
+        return false;
+      }
 
-    // 3. 關鍵字搜尋 (來源、分類、備註)
-    if (searchKeyword.value.trim()) {
-      const kw = searchKeyword.value.trim().toLowerCase();
-      const matchSource = i.source?.toLowerCase().includes(kw);
-      const matchCategory = i.category?.toLowerCase().includes(kw);
-      const matchNote = i.note?.toLowerCase().includes(kw);
-      if (!matchSource && !matchCategory && !matchNote) return false;
-    }
+      // 3. 關鍵字搜尋 (來源、分類、備註)
+      if (searchKeyword.value.trim()) {
+        const kw = searchKeyword.value.trim().toLowerCase();
+        const matchSource = i.source?.toLowerCase().includes(kw);
+        const matchCategory = i.category?.toLowerCase().includes(kw);
+        const matchNote = i.note?.toLowerCase().includes(kw);
+        if (!matchSource && !matchCategory && !matchNote) return false;
+      }
 
-    return true;
-  });
+      return true;
+    })
+    .sort(compareByDateAndCreatedDesc);
 });
 
 /**
- * 當月過濾後之回饋清單（結合月份、分類與關鍵字搜尋）
+ * 當月過濾後之回饋清單（結合月份、分類與關鍵字搜尋，並依年月及寫入順序降冪排序）
  */
 const currentMonthRewards = computed(() => {
-  return rewards.value.filter((r) => {
-    // 1. 月份過濾
-    if (!r.yearMonth?.startsWith(selectedMonth.value)) return false;
+  return rewards.value
+    .filter((r) => {
+      // 1. 月份過濾
+      if (!r.yearMonth?.startsWith(selectedMonth.value)) return false;
 
-    // 2. 分類過濾 (回饋無特定分類，若有選擇特定分類則排除)
-    if (selectedCategory.value) return false;
+      // 2. 分類過濾 (回饋無特定分類，若有選擇特定分類則排除)
+      if (selectedCategory.value) return false;
 
-    // 3. 關鍵字搜尋 (來源、備註)
-    if (searchKeyword.value.trim()) {
-      const kw = searchKeyword.value.trim().toLowerCase();
-      const matchSource = r.sourceName?.toLowerCase().includes(kw);
-      const matchNote = r.note?.toLowerCase().includes(kw);
-      if (!matchSource && !matchNote) return false;
-    }
+      // 3. 關鍵字搜尋 (來源、備註)
+      if (searchKeyword.value.trim()) {
+        const kw = searchKeyword.value.trim().toLowerCase();
+        const matchSource = r.sourceName?.toLowerCase().includes(kw);
+        const matchNote = r.note?.toLowerCase().includes(kw);
+        if (!matchSource && !matchNote) return false;
+      }
 
-    return true;
-  });
+      return true;
+    })
+    .sort(compareByDateAndCreatedDesc);
 });
 
 /**

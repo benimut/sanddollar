@@ -16,6 +16,7 @@ import type {
   IncomeSourceRecord,
   RewardSourceRecord,
 } from '@/types';
+import { sortStringsNaturally, sortByNameNaturally } from '@/utils/sort';
 
 /** 資料庫實例計數器，用於在測試環境建立隔離之資料庫實例 */
 let dbCounter = 0;
@@ -180,10 +181,11 @@ export const db = new TrackerDatabase();
  * @returns 分類記錄陣列
  */
 export async function getCategories(type?: 'expense' | 'income'): Promise<CategoryRecord[]> {
-  if (type !== undefined) {
-    return await db.categories.where('type').equals(type).toArray();
-  }
-  return await db.categories.toArray();
+  const records =
+    type !== undefined
+      ? await db.categories.where('type').equals(type).toArray()
+      : await db.categories.toArray();
+  return sortByNameNaturally(records);
 }
 
 /**
@@ -324,7 +326,7 @@ async function fetchDistinctNames<T extends { name: string }>(
       }
     }
   }
-  return Array.from(set);
+  return sortStringsNaturally(Array.from(set));
 }
 
 /**
@@ -582,7 +584,7 @@ export async function getPaymentMethods(): Promise<string[]> {
  * @returns 支付方式記錄陣列
  */
 export async function getPaymentMethodRecords(): Promise<PaymentMethodRecord[]> {
-  return db.paymentMethods ? await db.paymentMethods.toArray() : [];
+  return db.paymentMethods ? sortByNameNaturally(await db.paymentMethods.toArray()) : [];
 }
 
 /**
@@ -635,7 +637,7 @@ export async function deletePaymentMethod(id: number): Promise<void> {
  * @returns 收入來源記錄陣列
  */
 export async function getIncomeSourceRecords(): Promise<IncomeSourceRecord[]> {
-  return db.incomeSources ? await db.incomeSources.toArray() : [];
+  return db.incomeSources ? sortByNameNaturally(await db.incomeSources.toArray()) : [];
 }
 
 /**
@@ -685,7 +687,7 @@ export async function deleteIncomeSource(id: number): Promise<void> {
  * @returns 回饋來源記錄陣列
  */
 export async function getRewardSourceRecords(): Promise<RewardSourceRecord[]> {
-  return db.rewardSources ? await db.rewardSources.toArray() : [];
+  return db.rewardSources ? sortByNameNaturally(await db.rewardSources.toArray()) : [];
 }
 
 /**
@@ -783,7 +785,7 @@ export async function getDistinctMerchants(): Promise<string[]> {
     }
   }
 
-  return Array.from(merchants);
+  return sortStringsNaturally(Array.from(merchants));
 }
 
 /**
@@ -878,5 +880,5 @@ export async function getItemsByMerchant(
     }
   }
 
-  return Array.from(itemMap.values());
+  return sortByNameNaturally(Array.from(itemMap.values()));
 }

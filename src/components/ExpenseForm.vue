@@ -27,6 +27,7 @@ import {
 import { useCategories } from '@/composables/useCategories';
 import { getTodayDateString } from '@/utils/date';
 import { calculateForeignExpenseWithCustomFee } from '@/utils/currency';
+import { sortStringsNaturally } from '@/utils/sort';
 import type { ExpenseItem, ExpenseRecord } from '@/types';
 import type { ParsedInvoiceResult } from '@/utils/invoiceParser';
 import InvoiceScannerModal from './InvoiceScannerModal.vue';
@@ -289,7 +290,7 @@ async function loadPaymentMethodsList() {
   try {
     const list = await getPaymentMethods();
     const merged = new Set<string>([...DEFAULT_PAYMENT_METHODS, ...(Array.isArray(list) ? list : [])]);
-    paymentMethodList.value = Array.from(merged);
+    paymentMethodList.value = sortStringsNaturally(Array.from(merged));
     if (paymentMethodList.value.length === 0) {
       paymentMethod.value = '__add_new__';
       isAddingPayment.value = true;

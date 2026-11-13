@@ -35,6 +35,7 @@ import {
 } from '@/db';
 import { exportBackupData, importBackupData } from '@/utils/backup';
 import { getTodayDateString } from '@/utils/date';
+import { sortByNameNaturally } from '@/utils/sort';
 import type {
   CategoryRecord,
   PaymentMethodRecord,
@@ -58,7 +59,7 @@ const editingCategoryName = ref('');
  * 載入指定類型分類清單
  */
 async function loadCategories() {
-  categoryList.value = await getCategories(selectedCategoryType.value);
+  categoryList.value = sortByNameNaturally(await getCategories(selectedCategoryType.value));
 }
 
 /**

@@ -11,6 +11,7 @@
  */
 
 import { ref, computed } from 'vue';
+import { naturalCompare } from '@/utils/sort';
 
 export interface SelectItem<T = unknown> {
   name: string;
@@ -42,8 +43,8 @@ const sortedFilteredItems = computed(() => {
   const query = searchQuery.value.trim().toLowerCase();
   const list = [...props.items];
 
-  // 繁體中文自然名稱排序
-  list.sort((a, b) => (a.name || '').localeCompare(b.name || '', 'zh-Hant'));
+  // 繁體中文自然文字排序
+  list.sort((a, b) => naturalCompare(a.name || '', b.name || ''));
 
   if (!query) return list;
   return list.filter(
