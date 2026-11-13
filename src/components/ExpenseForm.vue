@@ -558,11 +558,20 @@ function addItem() {
 }
 
 /**
- * 移除指定索引的購買商品
+ * 移除指定索引的購買商品（僅剩一筆時重設為空白預設值，確保至少保留一列）
  */
 function removeItem(index: number) {
   if (items.value.length > 1) {
     items.value.splice(index, 1);
+  } else if (items.value.length === 1 && items.value[0]) {
+    // 僅剩最後一筆時重設為空白商品列，避免破壞表單至少一列的預設結構
+    items.value[0] = {
+      id: `item-${Date.now()}`,
+      name: '',
+      quantity: 1,
+      unitPrice: 0,
+      category: expenseCategoryList.value[0] || '',
+    };
   }
 }
 
@@ -929,7 +938,6 @@ async function handleSaveExpense() {
               [選擇]
             </button>
             <button
-              v-if="items.length > 1"
               type="button"
               class="text-xs text-rose-500 hover:text-rose-700 font-medium px-2 py-1 rounded hover:bg-rose-50"
               @click="removeItem(idx)"
@@ -1065,10 +1073,11 @@ async function handleSaveExpense() {
             <span class="text-xs text-rose-700 font-semibold">折抵項目 {{ dIdx + 1 }}</span>
             <button
               type="button"
-              class="text-xs text-rose-500 hover:text-rose-700"
+              class="text-xs text-rose-500 hover:text-rose-700 font-medium px-2 py-1 rounded hover:bg-rose-50"
               @click="removeDiscount(dIdx)"
+              aria-label="刪除此折扣"
             >
-              移除
+              刪除
             </button>
           </div>
 

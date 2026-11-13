@@ -1433,10 +1433,9 @@ describe('Milestone 5: TransactionForm 模組化拆分與歷史選單單元測�
             await flushAsync();
           }
 
-          const removeDiscBtn = Array.from(container.querySelectorAll('button')).find((b) =>
-            b.textContent?.trim() === '移除'
-          ) as HTMLButtonElement;
-          expect(removeDiscBtn, '應存在折扣移除按鈕').toBeDefined();
+          const removeDiscBtn = container.querySelector('button[aria-label="刪除此折扣"]') as HTMLButtonElement;
+          expect(removeDiscBtn, '應存在折扣刪除按鈕').toBeDefined();
+          expect(removeDiscBtn.textContent?.trim()).toBe('刪除');
           removeDiscBtn.click();
           await flushAsync();
 
@@ -2053,6 +2052,92 @@ describe('Milestone 5: TransactionForm 模組化拆分與歷史選單單元測�
         const discCat1 = container.querySelector('#disc-cat-1') as HTMLSelectElement | null;
         expect(discCat1).not.toBeNull();
         expect(Array.from(discCat1!.options).map((o) => o.value)).toEqual(['餐飲']);
+      } finally {
+        cleanup();
+      }
+    });
+  });
+
+  describe('購買商品明細的商品與折扣刪除按鈕測試 (ExpenseForm)', () => {
+    it('即使僅有一筆商品也顯示刪除按鈕，點擊後應重設該筆商品內容', async () => {
+      const { container, cleanup } = mountComponent(ExpenseForm);
+      await flushAsync();
+
+      try {
+        // 僅有一筆商品時，仍應顯示「刪除」按鈕
+        const itemDeleteBtns = container.querySelectorAll('button[aria-label="刪除此商品"]');
+        expect(itemDeleteBtns.length).toBe(1);
+        expect(itemDeleteBtns[0].textContent?.trim()).toBe('刪除');
+
+        // 填入商品資料後點擊刪除
+        const nameInput = container.querySelector('#expense-name') as HTMLInputElement;
+        const qtyInput = container.querySelector('#item-qty-0') as HTMLInputElement;
+        const priceInput = container.querySelector('#expense-amount') as HTMLInputElement;
+        nameInput.value = '拿鐵';
+        nameInput.dispatchEvent(new Event('input'));
+        qtyInput.value = '3';
+        qtyInput.dispatchEvent(new Event('input'));
+        priceInput.value = '120';
+        priceInput.dispatchEvent(new Event('input'));
+        await flushAsync();
+
+        (itemDeleteBtns[0] as HTMLButtonElement).click();
+        await flushAsync();
+
+        // 應保留一列並重設為預設空白值
+        expect(container.querySelectorAll('button[aria-label="刪除此商品"]').length).toBe(1);
+        expect((container.querySelector('#expense-name') as HTMLInputElement).value).toBe('');
+        expect((container.querySelector('#item-qty-0') as HTMLInputElement).value).toBe('1');
+        expect((container.querySelector('#expense-amount') as HTMLInputElement).value).toBe('0');
+      } finally {
+        cleanup();
+      }
+    });
+
+    it('多筆商品與折扣項目皆顯示刪除按鈕，點擊後各自移除對應項目', async () => {
+      const { container, cleanup } = mountComponent(ExpenseForm);
+      await flushAsync();
+
+      try {
+        // 填寫第一筆商品以啟用新增折扣
+        const name0 = container.querySelector('#expense-name') as HTMLInputElement;
+        const cat0 = container.querySelector('#expense-category') as HTMLSelectElement;
+        const price0 = container.querySelector('#expense-amount') as HTMLInputElement;
+        name0.value = '便當';
+        name0.dispatchEvent(new Event('input'));
+        cat0.value = cat0.options[0].value;
+        cat0.dispatchEvent(new Event('change'));
+        price0.value = '100';
+        price0.dispatchEvent(new Event('input'));
+        await flushAsync();
+
+        // 新增第二筆商品
+        const addItemBtn = container.querySelector('#btn-add-item') as HTMLButtonElement;
+        addItemBtn.click();
+        await flushAsync();
+        expect(container.querySelectorAll('button[aria-label="刪除此商品"]').length).toBe(2);
+
+        // 新增一筆折扣
+        const addDiscountBtn = Array.from(container.querySelectorAll('button')).find((b) =>
+          b.textContent?.includes('新增折扣')
+        ) as HTMLButtonElement;
+        addDiscountBtn.click();
+        await flushAsync();
+
+        const discDeleteBtns = container.querySelectorAll('button[aria-label="刪除此折扣"]');
+        expect(discDeleteBtns.length).toBe(1);
+        expect(discDeleteBtns[0].textContent?.trim()).toBe('刪除');
+
+        // 點擊折扣刪除按鈕後應移除該折扣
+        (discDeleteBtns[0] as HTMLButtonElement).click();
+        await flushAsync();
+        expect(container.querySelectorAll('button[aria-label="刪除此折扣"]').length).toBe(0);
+
+        // 點擊第二筆商品刪除按鈕後應剩下一筆商品
+        const itemDeleteBtns = container.querySelectorAll('button[aria-label="刪除此商品"]');
+        (itemDeleteBtns[1] as HTMLButtonElement).click();
+        await flushAsync();
+        expect(container.querySelectorAll('button[aria-label="刪除此商品"]').length).toBe(1);
       } finally {
         cleanup();
       }
