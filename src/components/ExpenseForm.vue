@@ -422,6 +422,14 @@ function removeItem(index: number) {
 }
 
 /**
+ * 數量輸入框取得焦點時自動全選內容，方便直接輸入新數量
+ */
+function handleQuantityFocus(e: FocusEvent) {
+  const target = e.target as HTMLInputElement | null;
+  target?.select();
+}
+
+/**
  * 新增一筆獨立折抵項目
  */
 function addDiscount() {
@@ -804,6 +812,7 @@ async function handleSaveExpense() {
               min="1"
               placeholder="數量"
               class="w-full text-sm border border-slate-200 rounded-lg p-1.5 bg-white focus:ring-2 focus:ring-teal-500 focus:outline-none"
+              @focus="handleQuantityFocus"
             />
           </div>
 
