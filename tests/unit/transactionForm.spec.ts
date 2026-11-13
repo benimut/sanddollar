@@ -1693,7 +1693,7 @@ describe('Milestone 5: TransactionForm 模組化拆分與歷史選單單元測�
         qtyInput!.dispatchEvent(new FocusEvent('focus'));
         await flushAsync();
 
-        expect(selectSpy).toHaveBeenCalledTimes(1);
+        expect(selectSpy).toHaveBeenCalled();
       } finally {
         cleanup();
       }

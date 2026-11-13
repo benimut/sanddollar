@@ -423,10 +423,15 @@ function removeItem(index: number) {
 
 /**
  * 數量輸入框取得焦點時自動全選內容，方便直接輸入新數量
+ * 使用 requestAnimationFrame 避免滑鼠點擊時的 mouseup 事件取消選取範圍
  */
 function handleQuantityFocus(e: FocusEvent) {
   const target = e.target as HTMLInputElement | null;
-  target?.select();
+  if (!target) return;
+  target.select();
+  requestAnimationFrame(() => {
+    target.select();
+  });
 }
 
 /**
