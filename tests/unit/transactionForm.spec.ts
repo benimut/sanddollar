@@ -1678,6 +1678,27 @@ describe('Milestone 5: TransactionForm 模組化拆分與歷史選單單元測�
       }
     });
   });
+
+  describe('商品數量輸入框 Focus 自動全選測試 (ExpenseForm)', () => {
+    it('點擊或 focus 商品數量輸入框 (#item-qty-0) 時，應自動觸發 select() 全選內容', async () => {
+      const { container, cleanup } = mountComponent(ExpenseForm);
+      await flushAsync();
+
+      try {
+        const qtyInput = container.querySelector('#item-qty-0') as HTMLInputElement | null;
+        expect(qtyInput, '應存在商品數量輸入框 #item-qty-0').not.toBeNull();
+        expect(qtyInput!.value).toBe('1');
+
+        const selectSpy = vi.spyOn(qtyInput!, 'select');
+        qtyInput!.dispatchEvent(new FocusEvent('focus'));
+        await flushAsync();
+
+        expect(selectSpy).toHaveBeenCalled();
+      } finally {
+        cleanup();
+      }
+    });
+  });
 });
 
 
