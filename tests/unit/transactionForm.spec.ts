@@ -1678,6 +1678,65 @@ describe('Milestone 5: TransactionForm 模組化拆分與歷史選單單元測�
       }
     });
   });
+
+  describe('折扣分類設定測試 (ExpenseForm)', () => {
+    it('點擊 + 新增折扣 後應顯示折扣分類選單 (#disc-cat-0)，預設非「其他」且儲存時應帶入所選分類', async () => {
+      vi.mocked(dbModule.getCategories).mockResolvedValue([
+        { id: 1, name: '餐飲', type: 'expense', isDefault: true },
+        { id: 2, name: '日用品', type: 'expense', isDefault: false },
+      ]);
+
+      const { container, cleanup } = mountComponent(ExpenseForm);
+      await flushAsync();
+
+      try {
+        // 先填寫第一項商品
+        const nameInput = container.querySelector('#expense-name') as HTMLInputElement;
+        const priceInput = container.querySelector('#expense-amount') as HTMLInputElement;
+        nameInput.value = '衛生紙';
+        nameInput.dispatchEvent(new Event('input'));
+        priceInput.value = '200';
+        priceInput.dispatchEvent(new Event('input'));
+
+        // 點擊 + 新增折扣
+        const buttons = Array.from(container.querySelectorAll('button'));
+        const addDiscBtn = buttons.find((b) => b.textContent?.includes('新增折扣')) as HTMLButtonElement;
+        expect(addDiscBtn).toBeTruthy();
+        addDiscBtn.click();
+        await flushAsync();
+
+        const discCatSelect = container.querySelector('#disc-cat-0') as HTMLSelectElement | null;
+        expect(discCatSelect, '應渲染折扣分類選單 #disc-cat-0').not.toBeNull();
+        expect(discCatSelect!.value).not.toBe('其他');
+        expect(discCatSelect!.value).toBeTruthy();
+
+        // 切換折扣分類為餐飲並填寫折扣名稱與金額
+        discCatSelect!.value = '餐飲';
+        discCatSelect!.dispatchEvent(new Event('change'));
+        const discNameInput = container.querySelector('#disc-name-0') as HTMLInputElement;
+        const discAmountInput = container.querySelector('#disc-amount-0') as HTMLInputElement;
+        discNameInput.value = '滿額折扣';
+        discNameInput.dispatchEvent(new Event('input'));
+        discAmountInput.value = '30';
+        discAmountInput.dispatchEvent(new Event('input'));
+        await flushAsync();
+
+        // 送出表單
+        const submitBtn = container.querySelector('#btn-submit-expense') as HTMLButtonElement;
+        submitBtn.click();
+        await flushAsync();
+
+        expect(dbModule.addExpense).toHaveBeenCalledTimes(1);
+        const savedRecord = vi.mocked(dbModule.addExpense).mock.calls[0][0];
+        const discItem = savedRecord.items.find((it) => it.type === 'discount');
+        expect(discItem).toBeDefined();
+        expect(discItem!.category).toBe('餐飲');
+        expect(discItem!.subtotal).toBe(-30);
+      } finally {
+        cleanup();
+      }
+    });
+  });
 });
 
 

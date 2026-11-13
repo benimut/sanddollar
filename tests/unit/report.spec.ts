@@ -398,6 +398,47 @@ describe('統計報表數據轉換核心模組 (report utility)', () => {
       });
     });
 
+    it('支出模式 (mode === "expense")：當某分類經折扣扣減後淨額小於或等於 0 時，不應出現負值或 0 切片', () => {
+      const mockExpenses: ExpenseRecord[] = [
+        {
+          id: 1,
+          date: '2024-11-12',
+          merchant: '咖啡廳',
+          paymentMethod: '現金',
+          totalAmount: 100,
+          isForeign: false,
+          items: [
+            {
+              id: 'i1',
+              type: 'item',
+              name: '拿鐵',
+              quantity: 1,
+              unitPrice: 150,
+              subtotal: 150,
+              category: '餐飲',
+            },
+            {
+              id: 'd1',
+              type: 'discount',
+              name: '折價券',
+              quantity: 1,
+              unitPrice: -50,
+              subtotal: -50,
+              category: '其他',
+            },
+          ],
+          createdAt: 1,
+          updatedAt: 1,
+        },
+      ];
+
+      const pieData = generateCategoryPieData(mockExpenses, [], 'expense');
+
+      expect(pieData.labels).toEqual(['餐飲']);
+      expect(pieData.datasets[0].data).toEqual([150]);
+      expect(pieData.labels).not.toContain('其他');
+    });
+
     it('收入模式 (mode === "income")：應依收入記錄的 category 加總金額', () => {
       const mockIncomes: IncomeRecord[] = [
         {

@@ -64,6 +64,8 @@ const distinctMerchants = ref<string[]>([]);
 
 /** 觸發新增分類之商品索引（若由全域觸發則為 null） */
 const categoryTargetItemIndex = ref<number | null>(null);
+/** 觸發新增分類之折扣索引（若由全域觸發則為 null） */
+const categoryTargetDiscountIndex = ref<number | null>(null);
 
 // 使用共用 Composable 管理支出分類
 const {
@@ -78,6 +80,10 @@ const {
     if (categoryTargetItemIndex.value !== null && items.value[categoryTargetItemIndex.value]) {
       items.value[categoryTargetItemIndex.value].category = newCat;
       categoryTargetItemIndex.value = null;
+    }
+    if (categoryTargetDiscountIndex.value !== null && discounts.value[categoryTargetDiscountIndex.value]) {
+      discounts.value[categoryTargetDiscountIndex.value].category = newCat;
+      categoryTargetDiscountIndex.value = null;
     }
   },
 });
@@ -381,8 +387,22 @@ function handleCategoryChange(idx: number, e: Event) {
   const target = e.target as HTMLSelectElement;
   if (target.value === '__add_new__') {
     categoryTargetItemIndex.value = idx;
+    categoryTargetDiscountIndex.value = null;
     showAddCategory.value = true;
     items.value[idx].category = '';
+  }
+}
+
+/**
+ * 監聽折扣分類選單變更，選中「新增」時展開輸入框
+ */
+function handleDiscountCategoryChange(dIdx: number, e: Event) {
+  const target = e.target as HTMLSelectElement;
+  if (target.value === '__add_new__') {
+    categoryTargetDiscountIndex.value = dIdx;
+    categoryTargetItemIndex.value = null;
+    showAddCategory.value = true;
+    discounts.value[dIdx].category = '';
   }
 }
 
@@ -425,11 +445,12 @@ function removeItem(index: number) {
  * 新增一筆獨立折抵項目
  */
 function addDiscount() {
+  const defaultCategory = items.value[0]?.category?.trim() || expenseCategoryList.value[0] || '餐飲';
   discounts.value.push({
     id: `disc-${Date.now()}`,
     name: '',
     amount: 0,
-    category: '其他',
+    category: defaultCategory,
   });
 }
 
@@ -510,6 +531,7 @@ function resetForm() {
   showAddCategory.value = false;
   newCategoryName.value = '';
   categoryTargetItemIndex.value = null;
+  categoryTargetDiscountIndex.value = null;
   customPaymentName.value = '';
   if (paymentMethodList.value.length === 0) {
     paymentMethod.value = '__add_new__';
@@ -539,6 +561,9 @@ async function handleSaveExpense() {
       await handleCreateCategory(cleanCat);
       if (categoryTargetItemIndex.value !== null && items.value[categoryTargetItemIndex.value]) {
         items.value[categoryTargetItemIndex.value].category = cleanCat;
+      }
+      if (categoryTargetDiscountIndex.value !== null && discounts.value[categoryTargetDiscountIndex.value]) {
+        discounts.value[categoryTargetDiscountIndex.value].category = cleanCat;
       }
     }
   }
@@ -906,18 +931,33 @@ async function handleSaveExpense() {
             </button>
           </div>
 
-          <div class="grid grid-cols-12 gap-2">
-            <div class="col-span-8">
-              <label :for="`disc-name-${dIdx}`" class="block text-[11px] text-slate-500 mb-0.5">折扣名稱</label>
-              <input
-                :id="`disc-name-${dIdx}`"
-                v-model="disc.name"
-                type="text"
-                placeholder="折扣說明"
+          <!-- 第 1 行：折扣名稱 -->
+          <div>
+            <label :for="`disc-name-${dIdx}`" class="block text-[11px] text-slate-500 mb-0.5">折扣名稱</label>
+            <input
+              :id="`disc-name-${dIdx}`"
+              v-model="disc.name"
+              type="text"
+              placeholder="折扣說明"
+              class="w-full text-sm border border-slate-200 rounded-lg p-1.5 bg-white focus:ring-2 focus:ring-teal-500 focus:outline-none"
+            />
+          </div>
+
+          <!-- 第 2 行：分類、折抵金額 -->
+          <div class="grid grid-cols-2 gap-2">
+            <div>
+              <label :for="`disc-cat-${dIdx}`" class="block text-[11px] text-slate-500 mb-0.5">分類</label>
+              <select
+                :id="`disc-cat-${dIdx}`"
+                v-model="disc.category"
                 class="w-full text-sm border border-slate-200 rounded-lg p-1.5 bg-white focus:ring-2 focus:ring-teal-500 focus:outline-none"
-              />
+                @change="handleDiscountCategoryChange(dIdx, $event)"
+              >
+                <option v-for="cat in expenseCategoryList" :key="cat" :value="cat">{{ cat }}</option>
+                <option value="__add_new__">+ 新增分類...</option>
+              </select>
             </div>
-            <div class="col-span-4">
+            <div>
               <label :for="`disc-amount-${dIdx}`" class="block text-[11px] text-slate-500 mb-0.5">折抵金額</label>
               <input
                 :id="`disc-amount-${dIdx}`"

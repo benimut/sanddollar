@@ -252,8 +252,10 @@ export function generateCategoryPieData(
     }
   }
 
-  // 取得不重複的分類名稱清單
-  const labels = Array.from(categoryMap.keys());
+  // 過濾淨額小於等於 0 的分類，避免折扣折抵後出現負值或零值切片
+  const labels = Array.from(categoryMap.entries())
+    .filter(([, amount]) => amount > 0)
+    .map(([label]) => label);
   const data: number[] = [];
   const backgroundColor: string[] = [];
 
