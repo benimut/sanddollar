@@ -99,9 +99,7 @@ describe('明細列表編輯聯動與完整編輯流程測試 (TransactionList &
       try {
         await flushAsync(100);
 
-        const editBtns = Array.from(container.querySelectorAll('button')).filter((b) =>
-          b.textContent?.trim().includes('編輯')
-        );
+        const editBtns = Array.from(container.querySelectorAll<HTMLButtonElement>('button.btn-edit'));
         expect(editBtns.length).toBeGreaterThan(0);
 
         // 點擊編輯按鈕
@@ -160,9 +158,7 @@ describe('明細列表編輯聯動與完整編輯流程測試 (TransactionList &
         await flushAsync(100);
 
         // 3. 在明細列表中尋找編輯按鈕並點擊
-        const editBtn = Array.from(container.querySelectorAll('button')).find((b) =>
-          b.textContent?.trim().includes('編輯')
-        );
+        const editBtn = container.querySelector<HTMLButtonElement>('button.btn-edit');
         expect(editBtn, '明細列表應有編輯按鈕').toBeTruthy();
         editBtn!.click();
         await flushAsync(100);
@@ -240,9 +236,7 @@ describe('明細列表編輯聯動與完整編輯流程測試 (TransactionList &
         await flushAsync(100);
 
         // 點擊編輯
-        const editBtn = Array.from(container.querySelectorAll('button')).find((b) =>
-          b.textContent?.trim().includes('編輯')
-        );
+        const editBtn = container.querySelector<HTMLButtonElement>('button.btn-edit');
         editBtn!.click();
         await flushAsync(100);
 
@@ -745,6 +739,79 @@ describe('明細列表編輯聯動與完整編輯流程測試 (TransactionList &
 
         // 第一個是空字串「全部分類」，後續應依自然數字順序排列
         expect(options).toEqual(['', '分類1', '分類2', '分類10']);
+      } finally {
+        cleanup();
+      }
+    });
+  });
+
+  describe('7. 明細列表顏色識別、欄位對齊與圖示按鈕排列測試', () => {
+    it('明細項目不應顯示「支出/收入/回饋」文字標籤，應以顏色區分並將編輯/刪除按鈕垂直排列且以符號取代文字', async () => {
+      await addExpense({
+        date: '2026-11-10',
+        merchant: '測試商店名稱非常長可能會影響排版對齊的測試商店',
+        paymentMethod: '現金',
+        items: [{ id: 'i1', type: 'item', name: '商品', quantity: 1, unitPrice: 150, subtotal: 150, category: '餐飲' }],
+        totalAmount: 150,
+        isForeign: false,
+        createdAt: 1000,
+        updatedAt: 1000,
+      });
+      await addIncome({
+        date: '2026-11-09',
+        source: '短來源',
+        category: '薪資',
+        amount: 5000,
+        isForeign: false,
+        createdAt: 2000,
+        updatedAt: 2000,
+      });
+      await addReward({
+        yearMonth: '2026-11',
+        sourceName: '信用卡回饋',
+        amount: 200,
+        createdAt: 3000,
+        updatedAt: 3000,
+      });
+
+      const { container, cleanup } = mountComponent(TransactionList, {
+        initialMonth: '2026-11',
+      });
+
+      try {
+        await flushAsync(100);
+        const cards = Array.from(container.querySelectorAll<HTMLElement>('div.rounded-xl')).filter((el) =>
+          el.querySelector('.btn-edit')
+        );
+        expect(cards).toHaveLength(3);
+
+        // 1. 卡片內不應出現「支出」、「收入」、「回饋」類型標籤文字，並具備對應顏色與左側色條
+        const [expCard, incCard, rewCard] = cards;
+        expect(expCard.className).toContain('border-l-rose-500');
+        expect(incCard.className).toContain('border-l-emerald-500');
+        expect(rewCard.className).toContain('border-l-blue-500');
+
+        for (const card of cards) {
+          const badgeTexts = Array.from(card.querySelectorAll('span')).map((s) => s.textContent?.trim());
+          expect(badgeTexts).not.toContain('支出');
+          expect(badgeTexts).not.toContain('收入');
+          expect(badgeTexts).not.toContain('回饋');
+        }
+
+        // 2. 編輯與刪除按鈕垂直排列 (flex-col)，且按鈕內不含「編輯」「刪除」文字，改為 SVG 圖示
+        for (const card of cards) {
+          const editBtn = card.querySelector<HTMLButtonElement>('.btn-edit');
+          const deleteBtn = card.querySelector<HTMLButtonElement>('.btn-delete');
+          expect(editBtn).toBeTruthy();
+          expect(deleteBtn).toBeTruthy();
+          expect(editBtn!.parentElement?.className).toContain('flex-col');
+          expect(editBtn!.textContent?.trim()).toBe('');
+          expect(deleteBtn!.textContent?.trim()).toBe('');
+          expect(editBtn!.querySelector('svg')).toBeTruthy();
+          expect(deleteBtn!.querySelector('svg')).toBeTruthy();
+          expect(editBtn!.getAttribute('aria-label')).toBeTruthy();
+          expect(deleteBtn!.getAttribute('aria-label')).toBeTruthy();
+        }
       } finally {
         cleanup();
       }

@@ -11,6 +11,7 @@
  */
 
 import { ref, computed, onMounted, watch } from 'vue';
+import { Pencil, Trash2 } from 'lucide-vue-next';
 import {
   getExpenses,
   getIncomes,
@@ -260,9 +261,6 @@ async function handleDelete(type: 'expense' | 'income' | 'reward', id?: number) 
 /**
  * 開啟編輯：發送事件至根層，切換為「記帳」頁籤完整編輯
  */
-function handleEdit(type: 'expense', item: ExpenseRecord): void;
-function handleEdit(type: 'income', item: IncomeRecord): void;
-function handleEdit(type: 'reward', item: MonthlyReward): void;
 function handleEdit(
   type: 'expense' | 'income' | 'reward',
   item: ExpenseRecord | IncomeRecord | MonthlyReward
@@ -275,6 +273,80 @@ function handleEdit(
     emit('edit', { type: 'reward', data: item as MonthlyReward });
   }
 }
+
+/**
+ * 統一明細列表渲染項目介面
+ */
+interface DisplayTransactionItem {
+  key: string;
+  type: 'expense' | 'income' | 'reward';
+  id?: number;
+  raw: ExpenseRecord | IncomeRecord | MonthlyReward;
+  title: string;
+  dateLabel: string;
+  categoryBadge?: string;
+  itemsSummary?: ExpenseRecord['items'];
+  note?: string;
+  amountText: string;
+  amountClass: string;
+  accentBorderClass: string;
+  editAriaLabel: string;
+  deleteAriaLabel: string;
+}
+
+/**
+ * 彙整當月支出、收入與回饋為統一排版清單，確保欄位對齊與視覺樣式一致
+ */
+const displayTransactions = computed<DisplayTransactionItem[]>(() => {
+  const expItems: DisplayTransactionItem[] = currentMonthExpenses.value.map((exp) => ({
+    key: `exp-${exp.id}`,
+    type: 'expense',
+    id: exp.id,
+    raw: exp,
+    title: exp.merchant,
+    dateLabel: exp.date,
+    itemsSummary: exp.items,
+    note: exp.note,
+    amountText: `-NT$ ${formatAmount(getDisplayExpenseAmount(exp))}`,
+    amountClass: 'text-rose-600',
+    accentBorderClass: 'border-l-rose-500',
+    editAriaLabel: '編輯此筆支出',
+    deleteAriaLabel: '刪除此筆支出',
+  }));
+
+  const incItems: DisplayTransactionItem[] = currentMonthIncomes.value.map((inc) => ({
+    key: `inc-${inc.id}`,
+    type: 'income',
+    id: inc.id,
+    raw: inc,
+    title: inc.source,
+    dateLabel: inc.date,
+    categoryBadge: inc.category,
+    note: inc.note,
+    amountText: `+NT$ ${formatAmount(inc.amount)}`,
+    amountClass: 'text-emerald-600',
+    accentBorderClass: 'border-l-emerald-500',
+    editAriaLabel: '編輯此筆收入',
+    deleteAriaLabel: '刪除此筆收入',
+  }));
+
+  const rewItems: DisplayTransactionItem[] = currentMonthRewards.value.map((rew) => ({
+    key: `rew-${rew.id}`,
+    type: 'reward',
+    id: rew.id,
+    raw: rew,
+    title: rew.sourceName,
+    dateLabel: rew.yearMonth,
+    note: rew.note,
+    amountText: `+NT$ ${formatAmount(rew.amount)}`,
+    amountClass: 'text-blue-600',
+    accentBorderClass: 'border-l-blue-500',
+    editAriaLabel: '編輯此筆回饋',
+    deleteAriaLabel: '刪除此筆回饋',
+  }));
+
+  return [...expItems, ...incItems, ...rewItems];
+});
 
 /**
  * 取得指定支出記錄在當前分類篩選下的顯示金額
@@ -390,133 +462,71 @@ function formatAmount(num: number): string {
     <div class="space-y-2">
       <!-- 若該月份無任何記錄 -->
       <div
-        v-if="
-          currentMonthExpenses.length === 0 &&
-          currentMonthIncomes.length === 0 &&
-          currentMonthRewards.length === 0
-        "
+        v-if="displayTransactions.length === 0"
         class="bg-white rounded-2xl p-8 text-center text-slate-400 text-xs border border-slate-100"
       >
         <span>{{ selectedMonth }} 尚無任何收支記錄</span>
       </div>
 
-      <!-- 支出記錄列表 -->
+      <!-- 統一收支回饋明細列表（以左側色條與金額顏色區分型態，固定欄位寬度對齊） -->
       <div
-        v-for="exp in currentMonthExpenses"
-        :key="`exp-${exp.id}`"
-        class="bg-white rounded-xl p-3.5 border border-slate-100 shadow-sm flex items-center justify-between"
+        v-for="tx in displayTransactions"
+        :key="tx.key"
+        class="bg-white rounded-xl p-3.5 border border-slate-100 border-l-4 shadow-sm flex items-center gap-3"
+        :class="tx.accentBorderClass"
       >
-        <div class="space-y-0.5">
-          <div class="flex items-center gap-1.5">
-            <span class="text-[11px] bg-rose-50 text-rose-600 px-1.5 py-0.5 rounded font-semibold">支出</span>
-            <span class="text-xs font-bold text-slate-800">{{ exp.merchant }}</span>
-            <span class="text-[11px] text-slate-400">{{ exp.date }}</span>
+        <!-- 左側：商店/來源名稱、日期、商品明細與備註 -->
+        <div class="flex-1 min-w-0 space-y-1">
+          <div class="flex items-center justify-between gap-2">
+            <div class="flex items-center gap-1.5 min-w-0">
+              <span class="text-xs font-bold text-slate-800 truncate" :title="tx.title">{{ tx.title }}</span>
+              <span
+                v-if="tx.categoryBadge"
+                class="text-[11px] bg-slate-100 text-slate-600 px-1.5 py-0.5 rounded shrink-0"
+              >
+                {{ tx.categoryBadge }}
+              </span>
+            </div>
+            <span class="text-[11px] text-slate-400 tabular-nums shrink-0">{{ tx.dateLabel }}</span>
           </div>
+
           <!-- 商品明細展示 -->
-          <div v-if="exp.items && exp.items.length > 0" class="text-[11px] text-slate-500">
-            <span v-for="(it, iIdx) in exp.items" :key="it.id || iIdx" class="mr-2">
+          <div v-if="tx.itemsSummary && tx.itemsSummary.length > 0" class="text-[11px] text-slate-500 truncate">
+            <span v-for="(it, iIdx) in tx.itemsSummary" :key="it.id || iIdx" class="mr-2">
               {{ it.name }} ({{ it.quantity }}x${{ it.unitPrice }})
             </span>
           </div>
-          <p v-if="exp.note" class="text-[11px] text-slate-400 italic">備註：{{ exp.note }}</p>
+
+          <p v-if="tx.note" class="text-[11px] text-slate-400 italic truncate">備註：{{ tx.note }}</p>
         </div>
 
-        <div class="flex items-center gap-3">
-          <span class="text-sm font-extrabold text-rose-600">
-            -NT$ {{ formatAmount(getDisplayExpenseAmount(exp)) }}<span v-if="selectedCategory" class="text-xs font-normal text-rose-500 ml-1">({{ selectedCategory }})</span>
+        <!-- 中右：金額（靠右對齊且不換行） -->
+        <div class="shrink-0 text-right min-w-[88px] tabular-nums">
+          <span class="text-sm font-extrabold whitespace-nowrap" :class="tx.amountClass">
+            {{ tx.amountText }}<span v-if="tx.type === 'expense' && selectedCategory" class="block text-[11px] font-normal text-rose-500">({{ selectedCategory }})</span>
           </span>
-          <div class="flex items-center gap-1">
-            <button
-              type="button"
-              class="btn-edit text-xs text-teal-600 hover:text-teal-800 font-medium px-2 py-1 rounded hover:bg-teal-50"
-              @click="handleEdit('expense', exp)"
-            >
-              編輯
-            </button>
-            <button
-              type="button"
-              class="btn-delete text-xs text-rose-500 hover:text-rose-700 font-medium px-2 py-1 rounded hover:bg-rose-50"
-              aria-label="刪除此筆支出"
-              @click="handleDelete('expense', exp.id)"
-            >
-              刪除
-            </button>
-          </div>
-        </div>
-      </div>
-
-      <!-- 收入記錄列表 -->
-      <div
-        v-for="inc in currentMonthIncomes"
-        :key="`inc-${inc.id}`"
-        class="bg-white rounded-xl p-3.5 border border-slate-100 shadow-sm flex items-center justify-between"
-      >
-        <div class="space-y-0.5">
-          <div class="flex items-center gap-1.5">
-            <span class="text-[11px] bg-emerald-50 text-emerald-600 px-1.5 py-0.5 rounded font-semibold">收入</span>
-            <span class="text-xs font-bold text-slate-800">{{ inc.source }}</span>
-            <span class="text-[11px] bg-slate-100 text-slate-600 px-1.5 py-0.2 rounded">{{ inc.category }}</span>
-            <span class="text-[11px] text-slate-400">{{ inc.date }}</span>
-          </div>
-          <p v-if="inc.note" class="text-[11px] text-slate-400 italic">備註：{{ inc.note }}</p>
         </div>
 
-        <div class="flex items-center gap-3">
-          <span class="text-sm font-extrabold text-emerald-600">+NT$ {{ formatAmount(inc.amount) }}</span>
-          <div class="flex items-center gap-1">
-            <button
-              type="button"
-              class="btn-edit text-xs text-teal-600 hover:text-teal-800 font-medium px-2 py-1 rounded hover:bg-teal-50"
-              @click="handleEdit('income', inc)"
-            >
-              編輯
-            </button>
-            <button
-              type="button"
-              class="btn-delete text-xs text-rose-500 hover:text-rose-700 font-medium px-2 py-1 rounded hover:bg-rose-50"
-              aria-label="刪除此筆收入"
-              @click="handleDelete('income', inc.id)"
-            >
-              刪除
-            </button>
-          </div>
-        </div>
-      </div>
-
-      <!-- 回饋記錄列表 -->
-      <div
-        v-for="rew in currentMonthRewards"
-        :key="`rew-${rew.id}`"
-        class="bg-white rounded-xl p-3.5 border border-slate-100 shadow-sm flex items-center justify-between"
-      >
-        <div class="space-y-0.5">
-          <div class="flex items-center gap-1.5">
-            <span class="text-[11px] bg-blue-50 text-blue-600 px-1.5 py-0.5 rounded font-semibold">回饋</span>
-            <span class="text-xs font-bold text-slate-800">{{ rew.sourceName }}</span>
-            <span class="text-[11px] text-slate-400">{{ rew.yearMonth }}</span>
-          </div>
-          <p v-if="rew.note" class="text-[11px] text-slate-400 italic">備註：{{ rew.note }}</p>
-        </div>
-
-        <div class="flex items-center gap-3">
-          <span class="text-sm font-extrabold text-blue-600">+NT$ {{ formatAmount(rew.amount) }}</span>
-          <div class="flex items-center gap-1">
-            <button
-              type="button"
-              class="btn-edit text-xs text-teal-600 hover:text-teal-800 font-medium px-2 py-1 rounded hover:bg-teal-50"
-              @click="handleEdit('reward', rew)"
-            >
-              編輯
-            </button>
-            <button
-              type="button"
-              class="btn-delete text-xs text-rose-500 hover:text-rose-700 font-medium px-2 py-1 rounded hover:bg-rose-50"
-              aria-label="刪除此筆回饋"
-              @click="handleDelete('reward', rew.id)"
-            >
-              刪除
-            </button>
-          </div>
+        <!-- 最右側：編輯與刪除按鈕垂直排列，以符號取代文字 -->
+        <div class="flex flex-col items-center justify-center gap-1 shrink-0">
+          <button
+            type="button"
+            class="btn-edit p-1.5 rounded-lg text-teal-600 hover:text-teal-800 hover:bg-teal-50 transition-colors"
+            :aria-label="tx.editAriaLabel"
+            title="編輯"
+            @click="handleEdit(tx.type, tx.raw)"
+          >
+            <Pencil class="w-3.5 h-3.5" aria-hidden="true" />
+          </button>
+          <button
+            type="button"
+            class="btn-delete p-1.5 rounded-lg text-rose-500 hover:text-rose-700 hover:bg-rose-50 transition-colors"
+            :aria-label="tx.deleteAriaLabel"
+            title="刪除"
+            @click="handleDelete(tx.type, tx.id)"
+          >
+            <Trash2 class="w-3.5 h-3.5" aria-hidden="true" />
+          </button>
         </div>
       </div>
     </div>
