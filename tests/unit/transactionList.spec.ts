@@ -99,9 +99,7 @@ describe('明細列表編輯聯動與完整編輯流程測試 (TransactionList &
       try {
         await flushAsync(100);
 
-        const editBtns = Array.from(container.querySelectorAll('button')).filter((b) =>
-          b.textContent?.trim().includes('編輯')
-        );
+        const editBtns = Array.from(container.querySelectorAll<HTMLButtonElement>('button.btn-edit'));
         expect(editBtns.length).toBeGreaterThan(0);
 
         // 點擊編輯按鈕
@@ -160,9 +158,7 @@ describe('明細列表編輯聯動與完整編輯流程測試 (TransactionList &
         await flushAsync(100);
 
         // 3. 在明細列表中尋找編輯按鈕並點擊
-        const editBtn = Array.from(container.querySelectorAll('button')).find((b) =>
-          b.textContent?.trim().includes('編輯')
-        );
+        const editBtn = container.querySelector<HTMLButtonElement>('button.btn-edit');
         expect(editBtn, '明細列表應有編輯按鈕').toBeTruthy();
         editBtn!.click();
         await flushAsync(100);
@@ -240,9 +236,7 @@ describe('明細列表編輯聯動與完整編輯流程測試 (TransactionList &
         await flushAsync(100);
 
         // 點擊編輯
-        const editBtn = Array.from(container.querySelectorAll('button')).find((b) =>
-          b.textContent?.trim().includes('編輯')
-        );
+        const editBtn = container.querySelector<HTMLButtonElement>('button.btn-edit');
         editBtn!.click();
         await flushAsync(100);
 
@@ -745,6 +739,303 @@ describe('明細列表編輯聯動與完整編輯流程測試 (TransactionList &
 
         // 第一個是空字串「全部分類」，後續應依自然數字順序排列
         expect(options).toEqual(['', '分類1', '分類2', '分類10']);
+      } finally {
+        cleanup();
+      }
+    });
+  });
+
+  describe('7. 明細列表顏色識別、欄位對齊與圖示按鈕排列測試', () => {
+    it('明細項目不應顯示「支出/收入/回饋」文字標籤，應以顏色區分並將編輯/刪除按鈕垂直排列且以符號取代文字', async () => {
+      await addExpense({
+        date: '2026-11-10',
+        merchant: '測試商店名稱非常長可能會影響排版對齊的測試商店',
+        paymentMethod: '現金',
+        items: [{ id: 'i1', type: 'item', name: '商品', quantity: 1, unitPrice: 150, subtotal: 150, category: '餐飲' }],
+        totalAmount: 150,
+        isForeign: false,
+        createdAt: 1000,
+        updatedAt: 1000,
+      });
+      await addIncome({
+        date: '2026-11-09',
+        source: '短來源',
+        category: '薪資',
+        amount: 5000,
+        isForeign: false,
+        createdAt: 2000,
+        updatedAt: 2000,
+      });
+      await addReward({
+        yearMonth: '2026-11',
+        sourceName: '信用卡回饋',
+        amount: 200,
+        createdAt: 3000,
+        updatedAt: 3000,
+      });
+
+      const { container, cleanup } = mountComponent(TransactionList, {
+        initialMonth: '2026-11',
+      });
+
+      try {
+        await flushAsync(100);
+        const cards = Array.from(container.querySelectorAll<HTMLElement>('div.rounded-xl')).filter((el) =>
+          el.querySelector('.btn-edit')
+        );
+        expect(cards).toHaveLength(3);
+
+        // 1. 卡片內不應出現「支出」、「收入」、「回饋」類型標籤文字，並具備對應顏色與左側色條
+        const [expCard, incCard, rewCard] = cards;
+        expect(expCard.className).toContain('border-l-rose-500');
+        expect(incCard.className).toContain('border-l-emerald-500');
+        expect(rewCard.className).toContain('border-l-blue-500');
+
+        for (const card of cards) {
+          const badgeTexts = Array.from(card.querySelectorAll('span')).map((s) => s.textContent?.trim());
+          expect(badgeTexts).not.toContain('支出');
+          expect(badgeTexts).not.toContain('收入');
+          expect(badgeTexts).not.toContain('回饋');
+        }
+
+        // 2. 編輯與刪除按鈕垂直排列 (flex-col)，且按鈕內不含「編輯」「刪除」文字，改為 SVG 圖示
+        for (const card of cards) {
+          const editBtn = card.querySelector<HTMLButtonElement>('.btn-edit');
+          const deleteBtn = card.querySelector<HTMLButtonElement>('.btn-delete');
+          expect(editBtn).toBeTruthy();
+          expect(deleteBtn).toBeTruthy();
+          expect(editBtn!.parentElement?.className).toContain('flex-col');
+          expect(editBtn!.textContent?.trim()).toBe('');
+          expect(deleteBtn!.textContent?.trim()).toBe('');
+          expect(editBtn!.querySelector('svg')).toBeTruthy();
+          expect(deleteBtn!.querySelector('svg')).toBeTruthy();
+          expect(editBtn!.getAttribute('aria-label')).toBeTruthy();
+          expect(deleteBtn!.getAttribute('aria-label')).toBeTruthy();
+
+          // 3. 日期與總金額垂直排列（同處於 flex-col 容器內）
+          const amountEl = card.querySelector('.text-sm.font-extrabold');
+          expect(amountEl).toBeTruthy();
+          const dateAndAmountBox = amountEl!.parentElement;
+          expect(dateAndAmountBox?.className).toContain('flex-col');
+          expect(dateAndAmountBox?.textContent).toMatch(/2026-11/);
+        }
+
+        // 4. 收入分類應位於來源名稱上方，並採垂直排列
+        const incHeaderSpans = Array.from(incCard.querySelectorAll('.flex-col > span'));
+        expect(incHeaderSpans.length).toBeGreaterThanOrEqual(2);
+        expect(incHeaderSpans[0].textContent?.trim()).toBe('薪資');
+        expect(incHeaderSpans[1].textContent?.trim()).toBe('短來源');
+        expect(incHeaderSpans[0].parentElement?.className).toContain('flex-col');
+      } finally {
+        cleanup();
+      }
+    });
+
+    it('商品明細應一筆一行顯示，最多只顯示前三筆，超過三筆時應顯示 ...', async () => {
+      await addExpense({
+        date: '2026-11-12',
+        merchant: '大賣場',
+        paymentMethod: '現金',
+        items: [
+          { id: 'p1', type: 'item', name: '商品一', quantity: 1, unitPrice: 10, subtotal: 10, category: '生活' },
+          { id: 'p2', type: 'item', name: '商品二', quantity: 2, unitPrice: 20, subtotal: 40, category: '生活' },
+          { id: 'p3', type: 'item', name: '商品三', quantity: 1, unitPrice: 30, subtotal: 30, category: '生活' },
+          { id: 'p4', type: 'item', name: '商品四不應顯示', quantity: 1, unitPrice: 40, subtotal: 40, category: '生活' },
+        ],
+        totalAmount: 120,
+        isForeign: false,
+        createdAt: 1000,
+        updatedAt: 1000,
+      });
+
+      const { container, cleanup } = mountComponent(TransactionList, {
+        initialMonth: '2026-11',
+      });
+
+      try {
+        await flushAsync(100);
+        const card = container.querySelector<HTMLElement>('div.rounded-xl.border-l-rose-500');
+        expect(card).toBeTruthy();
+
+        const cardText = card!.textContent || '';
+        expect(cardText).toContain('商品一 (1x$10)');
+        expect(cardText).toContain('商品二 (2x$20)');
+        expect(cardText).toContain('商品三 (1x$30)');
+        expect(cardText).not.toContain('商品四不應顯示');
+        expect(cardText).toContain('...');
+
+        // 確認商品明細為一筆一行（各自獨立的 div）
+        const itemLines = Array.from(card!.querySelectorAll('.text-slate-500 > div'));
+        expect(itemLines.length).toBe(4); // 前三筆商品 + "..." 一行
+        expect(itemLines[0].textContent?.trim()).toBe('商品一 (1x$10)');
+        expect(itemLines[1].textContent?.trim()).toBe('商品二 (2x$20)');
+        expect(itemLines[2].textContent?.trim()).toBe('商品三 (1x$30)');
+        expect(itemLines[3].textContent?.trim()).toBe('...');
+      } finally {
+        cleanup();
+      }
+    });
+  });
+
+  describe('8. 支付方式篩選功能測試 (Payment Method Filter)', () => {
+    it('應具備 #filter-payment-method 下拉選單，並彙整資料庫與歷史支出之支付方式選項', async () => {
+      const { addPaymentMethod } = await import('@/db');
+      await addPaymentMethod('街口支付');
+      await addPaymentMethod('現金');
+
+      await addExpense({
+        date: '2026-11-10',
+        merchant: '星巴克',
+        paymentMethod: '信用卡',
+        items: [
+          { id: 'pm-1', type: 'item', name: '拿鐵', category: '餐飲', quantity: 1, unitPrice: 150, subtotal: 150 },
+        ],
+        totalAmount: 150,
+        isForeign: false,
+        createdAt: 1000,
+        updatedAt: 1000,
+      });
+
+      const { container, cleanup } = mountComponent(TransactionList, {
+        initialMonth: '2026-11',
+      });
+
+      try {
+        await flushAsync(100);
+        const pmFilter = container.querySelector<HTMLSelectElement>('#filter-payment-method');
+        expect(pmFilter, '明細列表應包含 #filter-payment-method 支付方式下拉選單').not.toBeNull();
+
+        const options = Array.from(pmFilter!.querySelectorAll('option')).map((opt) => opt.value);
+        expect(options).toContain('');
+        expect(options).toContain('街口支付');
+        expect(options).toContain('現金');
+        expect(options).toContain('信用卡');
+      } finally {
+        cleanup();
+      }
+    });
+
+    it('選擇特定支付方式時，應僅顯示該支付方式之支出並排除收入與回饋，且統計金額同步更新', async () => {
+      await addExpense({
+        date: '2026-11-10',
+        merchant: '星巴克',
+        paymentMethod: '信用卡',
+        items: [
+          { id: 'pm-2', type: 'item', name: '拿鐵', category: '餐飲', quantity: 1, unitPrice: 150, subtotal: 150 },
+        ],
+        totalAmount: 150,
+        isForeign: false,
+        createdAt: 1000,
+        updatedAt: 1000,
+      });
+
+      await addExpense({
+        date: '2026-11-11',
+        merchant: '7-11',
+        paymentMethod: '現金',
+        items: [
+          { id: 'pm-3', type: 'item', name: '御飯糰', category: '餐飲', quantity: 1, unitPrice: 45, subtotal: 45 },
+        ],
+        totalAmount: 45,
+        isForeign: false,
+        createdAt: 2000,
+        updatedAt: 2000,
+      });
+
+      await addIncome({
+        date: '2026-11-05',
+        source: '十一月薪資',
+        category: '薪資',
+        amount: 50000,
+        isForeign: false,
+        createdAt: 1500,
+        updatedAt: 1500,
+      });
+
+      await addReward({
+        yearMonth: '2026-11',
+        sourceName: '信用卡回饋',
+        amount: 200,
+        createdAt: 1600,
+      });
+
+      const { container, cleanup } = mountComponent(TransactionList, {
+        initialMonth: '2026-11',
+      });
+
+      try {
+        await flushAsync(100);
+
+        const pmFilter = container.querySelector<HTMLSelectElement>('#filter-payment-method');
+        expect(pmFilter).not.toBeNull();
+
+        pmFilter!.value = '信用卡';
+        pmFilter!.dispatchEvent(new Event('change'));
+        await flushAsync(50);
+
+        const content = container.textContent || '';
+        expect(content).toContain('星巴克');
+        expect(content).not.toContain('7-11');
+        expect(content).not.toContain('十一月薪資');
+        expect(content).not.toContain('信用卡回饋');
+        expect(content).toContain('NT$ 150');
+        expect(content).toContain('NT$ 0');
+      } finally {
+        cleanup();
+      }
+    });
+
+    it('支付方式篩選可與分類篩選及關鍵字搜尋同時組合使用', async () => {
+      await addExpense({
+        date: '2026-11-10',
+        merchant: '全聯福利中心',
+        paymentMethod: 'LINE Pay',
+        items: [
+          { id: 'pm-4', type: 'item', name: '鮮奶', category: '餐飲', quantity: 1, unitPrice: 90, subtotal: 90 },
+          { id: 'pm-5', type: 'item', name: '洗碗精', category: '生活', quantity: 1, unitPrice: 120, subtotal: 120 },
+        ],
+        totalAmount: 210,
+        isForeign: false,
+        createdAt: 1000,
+        updatedAt: 1000,
+      });
+
+      await addExpense({
+        date: '2026-11-12',
+        merchant: '家樂福',
+        paymentMethod: 'LINE Pay',
+        items: [
+          { id: 'pm-6', type: 'item', name: '衛生紙', category: '生活', quantity: 1, unitPrice: 300, subtotal: 300 },
+        ],
+        totalAmount: 300,
+        isForeign: false,
+        createdAt: 2000,
+        updatedAt: 2000,
+      });
+
+      const { container, cleanup } = mountComponent(TransactionList, {
+        initialMonth: '2026-11',
+      });
+
+      try {
+        await flushAsync(100);
+
+        const pmFilter = container.querySelector<HTMLSelectElement>('#filter-payment-method')!;
+        const catFilter = container.querySelector<HTMLSelectElement>('#filter-category')!;
+        const kwFilter = container.querySelector<HTMLInputElement>('#filter-keyword')!;
+
+        pmFilter.value = 'LINE Pay';
+        pmFilter.dispatchEvent(new Event('change'));
+        catFilter.value = '生活';
+        catFilter.dispatchEvent(new Event('change'));
+        kwFilter.value = '全聯';
+        kwFilter.dispatchEvent(new Event('input'));
+        await flushAsync(50);
+
+        const content = container.textContent || '';
+        expect(content).toContain('全聯福利中心');
+        expect(content).not.toContain('家樂福');
+        expect(content).toContain('NT$ 120');
       } finally {
         cleanup();
       }
