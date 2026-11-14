@@ -35,6 +35,11 @@ import {
   updateRewardSource,
   deleteRewardSource,
   setPreferredRewardSource,
+  getMerchantRecords,
+  addMerchant,
+  updateMerchant,
+  deleteMerchant,
+  togglePreferredMerchant,
   clearAllDatabaseData,
 } from '@/db';
 import { exportBackupData, importBackupData } from '@/utils/backup';
@@ -45,6 +50,7 @@ import type {
   PaymentMethodRecord,
   IncomeSourceRecord,
   RewardSourceRecord,
+  MerchantRecord,
 } from '@/types';
 
 // ==================== 1. 分類管理狀態 ====================
@@ -299,6 +305,57 @@ async function handleSetDefaultRewardSource(id: number) {
   await loadRewardSources();
 }
 
+// ==================== 4.5 店家管理狀態（多選常用） ====================
+/** 當前店家清單列表 */
+const merchantList = ref<MerchantRecord[]>([]);
+
+/**
+ * 載入店家清單
+ */
+async function loadMerchants() {
+  merchantList.value = await getMerchantRecords();
+}
+
+/**
+ * 新增店家
+ */
+async function handleAddMerchant(name: string) {
+  try {
+    await addMerchant(name);
+    await loadMerchants();
+  } catch (err: unknown) {
+    alert(err instanceof Error ? err.message : '新增店家失敗');
+  }
+}
+
+/**
+ * 更新店家名稱
+ */
+async function handleUpdateMerchant(payload: { id: number; name: string }) {
+  try {
+    await updateMerchant(payload.id, payload.name);
+    await loadMerchants();
+  } catch (err: unknown) {
+    alert(err instanceof Error ? err.message : '更新店家失敗');
+  }
+}
+
+/**
+ * 刪除店家
+ */
+async function handleDeleteMerchant(id: number) {
+  await deleteMerchant(id);
+  await loadMerchants();
+}
+
+/**
+ * 切換店家的預設／常用狀態（多選）
+ */
+async function handleTogglePreferredMerchant(id: number) {
+  await togglePreferredMerchant(id);
+  await loadMerchants();
+}
+
 // ==================== 5. 備份與還原管理 ====================
 /** 備份檔案輸入元素參照 (隱藏之 HTML 檔案選擇器) */
 const fileInputRef = ref<HTMLInputElement | null>(null);
@@ -358,7 +415,7 @@ async function handleFileChange(event: Event) {
       const result = await importBackupData(content, 'overwrite');
 
       if (result.success) {
-        backupStatusMessage.value = `還原成功！已匯入：支出 ${result.importedCount.expenses} 筆、收入 ${result.importedCount.incomes} 筆、回饋 ${result.importedCount.rewards} 筆、分類 ${result.importedCount.categories} 筆、支付方式 ${result.importedCount.paymentMethods ?? 0} 筆、收入來源 ${result.importedCount.incomeSources ?? 0} 筆、回饋來源 ${result.importedCount.rewardSources ?? 0} 筆`;
+        backupStatusMessage.value = `還原成功！已匯入：支出 ${result.importedCount.expenses} 筆、收入 ${result.importedCount.incomes} 筆、回饋 ${result.importedCount.rewards} 筆、分類 ${result.importedCount.categories} 筆、支付方式 ${result.importedCount.paymentMethods ?? 0} 筆、收入來源 ${result.importedCount.incomeSources ?? 0} 筆、回饋來源 ${result.importedCount.rewardSources ?? 0} 筆、店家 ${result.importedCount.merchants ?? 0} 筆`;
         isBackupError.value = false;
         await loadAllData();
       } else {
@@ -428,6 +485,7 @@ async function loadAllData() {
     loadPaymentMethods(),
     loadIncomeSources(),
     loadRewardSources(),
+    loadMerchants(),
   ]);
 }
 
@@ -587,6 +645,21 @@ onMounted(() => {
       @update="handleUpdatePaymentMethod"
       @delete="handleDeletePaymentMethod"
       @set-default="handleSetDefaultPaymentMethod"
+    />
+
+    <!-- 2.5 店家管理區塊（多選常用） -->
+    <SettingsItemManager
+      title="店家管理"
+      icon="🏪"
+      placeholder="輸入新店家名稱 (如: 全家便利商店、星巴克)..."
+      id-prefix="merchant"
+      :items="merchantList"
+      :multi-default="true"
+      empty-text="尚無任何店家記錄"
+      @add="handleAddMerchant"
+      @update="handleUpdateMerchant"
+      @delete="handleDeleteMerchant"
+      @set-default="handleTogglePreferredMerchant"
     />
 
     <!-- 3. 常用收入來源管理區塊 -->

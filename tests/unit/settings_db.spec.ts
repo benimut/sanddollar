@@ -26,6 +26,13 @@ import {
   getPreferredPaymentMethod,
   getIncomeSourceRecords,
   addIncomeSource,
+  getMerchantRecords,
+  addMerchant,
+  updateMerchant,
+  deleteMerchant,
+  togglePreferredMerchant,
+  getPreferredMerchants,
+  addExpense,
   updateIncomeSource,
   deleteIncomeSource,
   setPreferredIncomeSource,
@@ -866,11 +873,11 @@ describe('Sand Dollar 設定頁面資料庫 CRUD 與全庫清空單元測試 (se
   // 6. 資料庫版本升級 (version 4) 與歷史來源自動遷移測試
   // ==========================================
   describe('資料庫版本升級 (version 4) 與歷史來源自動遷移', () => {
-    it('TrackerDatabase 應宣告 version(5) 並包含 incomeSources 與 rewardSources 資料表', async () => {
-      // 驗證目前資料庫版本號為 5
-      expect(db.verno).toBe(5);
+    it('TrackerDatabase 應宣告 version(6) 並包含 incomeSources、rewardSources 與 merchants 資料表', async () => {
+      // 驗證目前資料庫版本號為 6
+      expect(db.verno).toBe(6);
 
-      // 驗證 7 個表格皆正常宣告存在
+      // 驗證 8 個表格皆正常宣告存在
       expect(db.tables.map((t) => t.name)).toEqual(
         expect.arrayContaining([
           'expenses',
@@ -880,6 +887,7 @@ describe('Sand Dollar 設定頁面資料庫 CRUD 與全庫清空單元測試 (se
           'paymentMethods',
           'incomeSources',
           'rewardSources',
+          'merchants',
         ])
       );
     });
@@ -919,7 +927,7 @@ describe('Sand Dollar 設定頁面資料庫 CRUD 與全庫清空單元測試 (se
       const upgradedDb = new TrackerDatabase(upgradeDbName);
       await upgradedDb.open();
 
-      expect(upgradedDb.verno).toBe(5);
+      expect(upgradedDb.verno).toBe(6);
 
       // 3. 驗證 incomeSources 自動提取與去重結果
       const incomeSources = await upgradedDb.incomeSources.toArray();
@@ -1027,6 +1035,88 @@ describe('Sand Dollar 設定頁面資料庫 CRUD 與全庫清空單元測試 (se
 
       upgradedDb.close();
       await Dexie.delete(upgradeV5Name);
+    });
+  });
+
+  // ==========================================
+  // 7. 店家管理與多選常用 (merchants) 測試
+  // ==========================================
+  describe('店家管理與多選常用 (merchants)', () => {
+    it('新增店家預設不設為常用，且可多選切換與全部取消', async () => {
+      const id1 = await addMerchant('全家便利商店');
+      const id2 = await addMerchant('星巴克');
+      const id3 = await addMerchant('7-ELEVEN');
+
+      // 預設皆不為常用，不自動設定
+      expect(await getPreferredMerchants()).toEqual([]);
+
+      // 多選開啟 2 個常用店家
+      await togglePreferredMerchant(id1);
+      await togglePreferredMerchant(id2);
+      expect(await getPreferredMerchants()).toEqual(['全家便利商店', '星巴克']);
+
+      // 全部取消後維持空陣列，不自動補齊
+      await togglePreferredMerchant(id1);
+      await togglePreferredMerchant(id2);
+      expect(await getPreferredMerchants()).toEqual([]);
+
+      // id3 仍存在於設定表
+      const records = await getMerchantRecords();
+      expect(records.map((r) => r.id)).toContain(id3);
+    });
+
+    it('updateMerchant 應同步更新歷史消費記錄，deleteMerchant 不影響歷史消費記錄', async () => {
+      const mId = await addMerchant('舊店家名稱');
+      const expId = await addExpense({
+        date: '2026-11-15',
+        merchant: '舊店家名稱',
+        paymentMethod: '現金',
+        totalAmount: 100,
+        isForeign: false,
+        items: [],
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
+      });
+
+      await updateMerchant(mId, '新店家名稱');
+      const updatedExp = await db.expenses.get(expId);
+      expect(updatedExp?.merchant).toBe('新店家名稱');
+
+      await deleteMerchant(mId);
+      expect(await getMerchantRecords()).toHaveLength(0);
+      const expAfterDelete = await db.expenses.get(expId);
+      expect(expAfterDelete?.merchant).toBe('新店家名稱');
+    });
+
+    it('version(6) upgrade 應自動遷移歷史消費店家，且不自動設為常用', async () => {
+      const upgradeV6Name = `UpgradeV6TestDB_${Date.now()}`;
+      const oldDb = new Dexie(upgradeV6Name);
+      oldDb.version(5).stores({
+        expenses: '++id, date, merchant, paymentMethod, totalAmount, isForeign',
+        incomes: '++id, date, source, category, amount, isForeign',
+        rewards: '++id, yearMonth, sourceName',
+        categories: '++id, name, type, isDefault, [type+name]',
+        paymentMethods: '++id, name, isDefault',
+        incomeSources: '++id, name, isDefault',
+        rewardSources: '++id, name, isDefault',
+      });
+      await oldDb.open();
+      await oldDb.table('expenses').bulkAdd([
+        { date: '2026-11-01', merchant: '麥當勞', paymentMethod: '現金', totalAmount: 120, isForeign: false, items: [], createdAt: 1, updatedAt: 1 },
+        { date: '2026-11-02', merchant: '  麥當勞  ', paymentMethod: '現金', totalAmount: 80, isForeign: false, items: [], createdAt: 2, updatedAt: 2 },
+        { date: '2026-11-03', merchant: '摩斯漢堡', paymentMethod: '現金', totalAmount: 150, isForeign: false, items: [], createdAt: 3, updatedAt: 3 },
+      ]);
+      oldDb.close();
+
+      const upgradedDb = new TrackerDatabase(upgradeV6Name);
+      await upgradedDb.open();
+
+      const migrated = await upgradedDb.merchants.toArray();
+      expect(migrated.map((m) => m.name).sort()).toEqual(['摩斯漢堡', '麥當勞']);
+      expect(migrated.some((m) => m.isPreferred === true)).toBe(false);
+
+      upgradedDb.close();
+      await Dexie.delete(upgradeV6Name);
     });
   });
 });

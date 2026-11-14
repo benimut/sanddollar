@@ -15,6 +15,7 @@ import type {
   PaymentMethodRecord,
   IncomeSourceRecord,
   RewardSourceRecord,
+  MerchantRecord,
   BackupDataPayload,
   ImportBackupResult,
 } from '@/types';
@@ -38,6 +39,7 @@ export async function exportBackupData(dbInstance?: TrackerDatabase): Promise<st
   const paymentMethods = targetDb.paymentMethods ? await targetDb.paymentMethods.toArray() : [];
   const incomeSources = targetDb.incomeSources ? await targetDb.incomeSources.toArray() : [];
   const rewardSources = targetDb.rewardSources ? await targetDb.rewardSources.toArray() : [];
+  const merchants = targetDb.merchants ? await targetDb.merchants.toArray() : [];
 
   // 若資料庫為全新空資料庫（完全無支出、收入、回饋記錄且無任何自訂分類），匯出之各表格為空陣列；
   // 若包含任一筆使用者業務數據或自訂分類，則完整匯出所有分類記錄（含預設種子分類與自訂分類）
@@ -48,6 +50,7 @@ export async function exportBackupData(dbInstance?: TrackerDatabase): Promise<st
     paymentMethods.length > 0 ||
     incomeSources.length > 0 ||
     rewardSources.length > 0 ||
+    merchants.length > 0 ||
     allCategories.some((c) => !c.isDefault);
   const categories = hasUserData ? allCategories : [];
 
@@ -62,6 +65,7 @@ export async function exportBackupData(dbInstance?: TrackerDatabase): Promise<st
       paymentMethods,
       incomeSources,
       rewardSources,
+      merchants,
     },
   };
 
@@ -90,6 +94,7 @@ export async function importBackupData(
     paymentMethods: 0,
     incomeSources: 0,
     rewardSources: 0,
+    merchants: 0,
   };
 
   // 1. 解析 JSON 字串
@@ -187,18 +192,28 @@ export async function importBackupData(
     };
   }
 
+  if (payload.data.merchants !== undefined && !Array.isArray(payload.data.merchants)) {
+    return {
+      success: false,
+      importedCount: emptyCount,
+      error: '備份資料格式錯誤：merchants 必須為陣列',
+    };
+  }
+
   const targetDb = dbInstance ?? db;
   const { expenses, incomes, rewards } = payload.data;
   const categories = Array.isArray(payload.data.categories) ? payload.data.categories : [];
   const paymentMethods = Array.isArray(payload.data.paymentMethods) ? payload.data.paymentMethods : [];
   const incomeSources = Array.isArray(payload.data.incomeSources) ? payload.data.incomeSources : [];
   const rewardSources = Array.isArray(payload.data.rewardSources) ? payload.data.rewardSources : [];
+  const merchants = Array.isArray(payload.data.merchants) ? payload.data.merchants : [];
 
   const tables: Table[] = [targetDb.expenses, targetDb.incomes, targetDb.rewards];
   if (targetDb.categories) tables.push(targetDb.categories);
   if (targetDb.paymentMethods) tables.push(targetDb.paymentMethods);
   if (targetDb.incomeSources) tables.push(targetDb.incomeSources);
   if (targetDb.rewardSources) tables.push(targetDb.rewardSources);
+  if (targetDb.merchants) tables.push(targetDb.merchants);
 
   try {
     if (mode === 'overwrite') {
@@ -218,6 +233,9 @@ export async function importBackupData(
         }
         if (targetDb.rewardSources) {
           await targetDb.rewardSources.clear();
+        }
+        if (targetDb.merchants) {
+          await targetDb.merchants.clear();
         }
 
         if (expenses.length > 0) {
@@ -240,6 +258,9 @@ export async function importBackupData(
         }
         if (targetDb.rewardSources && rewardSources.length > 0) {
           await targetDb.rewardSources.bulkAdd(rewardSources);
+        }
+        if (targetDb.merchants && merchants.length > 0) {
+          await targetDb.merchants.bulkAdd(merchants);
         }
       });
     } else {
@@ -305,6 +326,18 @@ export async function importBackupData(
             }
           }
         }
+
+        // merchants 合併去重邏輯
+        if (targetDb.merchants && merchants.length > 0) {
+          const existingMerchants = await targetDb.merchants.toArray();
+          for (const item of merchants) {
+            const { id, ...rest } = item;
+            const isDup = existingMerchants.some((m) => m.name === rest.name);
+            if (!isDup) {
+              await targetDb.merchants.add(rest as MerchantRecord);
+            }
+          }
+        }
       });
     }
 
@@ -319,6 +352,7 @@ export async function importBackupData(
       paymentMethods: paymentMethods.length,
       incomeSources: incomeSources.length,
       rewardSources: rewardSources.length,
+      merchants: merchants.length,
     };
 
     return {

@@ -205,6 +205,20 @@ export interface RewardSourceRecord {
 }
 
 /**
+ * 店家表記錄介面 (IndexedDB merchants 表資料結構)
+ */
+export interface MerchantRecord {
+  /** 本地資料庫主鍵，自動遞增識別碼 (選填，新增時由 IndexedDB 自動產生) */
+  id?: number;
+  /** 店家名稱 (例如：「全家便利商店」、「星巴克」) */
+  name: string;
+  /** 是否為系統內建預設店家 */
+  isDefault?: boolean;
+  /** 是否設為預設／常用店家 (支援多選) */
+  isPreferred?: boolean;
+}
+
+/**
  * 備份資料酬載介面
  */
 export interface BackupDataPayload {
@@ -228,6 +242,8 @@ export interface BackupDataPayload {
     incomeSources?: IncomeSourceRecord[];
     /** 回饋來源記錄陣列 */
     rewardSources?: RewardSourceRecord[];
+    /** 店家記錄陣列 */
+    merchants?: MerchantRecord[];
   };
 }
 
@@ -253,6 +269,8 @@ export interface ImportBackupResult {
     incomeSources?: number;
     /** 匯入之回饋來源記錄筆數 */
     rewardSources?: number;
+    /** 匯入之店家記錄筆數 */
+    merchants?: number;
   };
   /** 錯誤訊息字串 (若失敗時提供具體失敗原因) */
   error?: string;
