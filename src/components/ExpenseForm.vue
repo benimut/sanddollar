@@ -151,12 +151,49 @@ interface FormDiscount {
   amount: number;
   /** 歸屬分類 */
   category: string;
-  /** 編輯舊資料載入時保留之原始歷史分類（若不在現有商品分類內供修改用） */
-  legacyCategory?: string;
 }
 
 // 折扣明細清單
 const discounts = ref<FormDiscount[]>([]);
+
+// 表單驗證錯誤狀態
+const errorMessage = ref('');
+const errorField = ref('');
+
+/**
+ * 設定表單驗證錯誤訊息與第一個錯誤欄位鍵值
+ */
+function setValidationError(field: string, message: string): false {
+  errorField.value = field;
+  errorMessage.value = message;
+  return false;
+}
+
+/**
+ * 清除表單驗證錯誤狀態
+ */
+function clearValidationError() {
+  errorField.value = '';
+  errorMessage.value = '';
+}
+
+/**
+ * 判斷數值輸入是否為空白或無效數字 (包含 v-model.number 清空後產生的空字串)
+ */
+function isBlankOrInvalidNumber(val: unknown): boolean {
+  if (val === '' || val === null || val === undefined || typeof val === 'boolean') {
+    return true;
+  }
+  const num = Number(val);
+  return Number.isNaN(num) || !Number.isFinite(num);
+}
+
+/**
+ * 取得欄位錯誤紅框樣式類別
+ */
+function errorBorderClass(field: string): string {
+  return errorField.value === field ? 'border-rose-500 ring-2 ring-rose-200' : '';
+}
 
 // 海外支出相關欄位
 const foreignExpenseCurrency = ref('USD');
@@ -241,14 +278,10 @@ const categorySubtotals = computed<Record<string, number>>(() => {
 const canAddDiscount = computed(() => availableDiscountCategories.value.length > 0);
 
 /**
- * 取得指定折扣項目的分類下拉選項（編輯舊資料時保留原始歷史分類）
+ * 取得指定折扣項目的分類下拉選項
  */
-function getDiscountCategoryOptions(disc: FormDiscount): string[] {
-  const base = [...availableDiscountCategories.value];
-  if (disc.legacyCategory && !base.includes(disc.legacyCategory)) {
-    base.push(disc.legacyCategory);
-  }
-  return base;
+function getDiscountCategoryOptions(_disc: FormDiscount): string[] {
+  return [...availableDiscountCategories.value];
 }
 
 /**
@@ -259,7 +292,7 @@ function getMaxDiscountAmount(dIdx: number): number | undefined {
   if (!target) return undefined;
   const cat = target.category?.trim();
   if (!cat || !(cat in categorySubtotals.value)) {
-    return target.legacyCategory === cat ? undefined : 0;
+    return 0;
   }
   const usedByOthers = discounts.value.reduce((sum, d, idx) => {
     if (idx === dIdx || d.category !== cat) return sum;
@@ -305,26 +338,20 @@ function handleDiscountAmountInput(dIdx: number, e: Event) {
 }
 
 /**
- * 處理折扣分類切換：若切換為商品分類則清除歷史分類標記並重新檢核上限
+ * 處理折扣分類切換：重新檢核上限
  */
-function handleDiscountCategorySelectChange(dIdx: number) {
-  const disc = discounts.value[dIdx];
-  if (!disc) return;
-  if (disc.legacyCategory && disc.category !== disc.legacyCategory) {
-    disc.legacyCategory = undefined;
-  }
+function handleDiscountCategorySelectChange(_dIdx: number) {
   clampDiscountsToCategoryLimits();
 }
 
-// 商品分類變動時，直接刪除已不存在於同筆支出商品分類中的折扣項目（保留編輯舊資料之 legacyCategory）
+// 商品分類變動時，保留留空待選項目與仍存在於同筆支出商品分類中的折扣項目
 watch(availableDiscountCategories, (cats) => {
+  if (isEditMode.value && !isListsLoaded.value) return;
   if (cats.length === 0) {
     discounts.value = [];
     return;
   }
-  discounts.value = discounts.value.filter(
-    (d) => cats.includes(d.category) || (Boolean(d.legacyCategory) && d.category === d.legacyCategory)
-  );
+  discounts.value = discounts.value.filter((d) => d.category === '' || cats.includes(d.category));
   clampDiscountsToCategoryLimits();
 });
 
@@ -346,24 +373,57 @@ const discountsTotal = computed(() => {
   return discounts.value.reduce((sum, disc) => sum + (Number(disc.amount) || 0), 0);
 });
 
-// 海外支出模式下外幣金額與商品明細小計/折扣動態連動
+// 海外支出模式下外幣金額唯讀，無條件自動同步為商品明細扣除折扣後的金額
 watch([isForeignExpense, itemsSubtotal, discountsTotal], () => {
   if (isForeignExpense.value) {
-    if (itemsSubtotal.value > 0) {
-      const calc = itemsSubtotal.value - discountsTotal.value;
-      foreignExpenseAmount.value = calc >= 0 ? calc : 0;
-    }
+    const calc = itemsSubtotal.value - discountsTotal.value;
+    foreignExpenseAmount.value = calc >= 0 ? calc : 0;
   }
 });
+
+const isListsLoaded = ref(false);
+
+/**
+ * 編輯模式下比對設定清單，若舊記錄之分類、支付方式或折扣分類已不存在於目前設定清單中，
+ * 則清空該欄位（留空以強制使用者重新選擇有效項目）
+ */
+function reconcileEditSelections() {
+  if (!isEditMode.value || !isListsLoaded.value) return;
+
+  if (
+    paymentMethod.value &&
+    paymentMethod.value !== '__add_new__' &&
+    !paymentMethodList.value.includes(paymentMethod.value)
+  ) {
+    paymentMethod.value = '';
+  }
+
+  for (const it of items.value) {
+    if (
+      it.category &&
+      it.category !== '__add_new__' &&
+      !expenseCategoryList.value.includes(it.category)
+    ) {
+      it.category = '';
+    }
+  }
+
+  for (const d of discounts.value) {
+    if (d.category && !availableDiscountCategories.value.includes(d.category)) {
+      d.category = '';
+    }
+  }
+}
 
 // 監聽 props.editData 進入編輯模式時完整帶入資料
 watch(
   () => props.editData,
   (data) => {
+    clearValidationError();
     if (data) {
-      expenseDate.value = data.date || getTodayDateString();
+      expenseDate.value = data.date || '';
       merchant.value = data.merchant || '';
-      paymentMethod.value = data.paymentMethod || (paymentMethodList.value.length > 0 ? paymentMethodList.value[0] : '__add_new__');
+      paymentMethod.value = data.paymentMethod || '';
       isAddingPayment.value = paymentMethod.value === '__add_new__';
       expenseNote.value = data.note || '';
       isForeignExpense.value = !!data.isForeign;
@@ -382,23 +442,20 @@ watch(
             name: it.name,
             quantity: it.quantity,
             unitPrice: it.unitPrice,
-            category: it.category || '其他',
+            category: it.category || '',
           }));
         }
 
         if (discountItems.length > 0) {
-          discounts.value = discountItems.map((d, idx) => {
-            const cat = d.category || '其他';
-            return {
-              id: d.id || `disc-${idx}-${Date.now()}`,
-              name: d.name,
-              amount: Math.abs(d.unitPrice),
-              category: cat,
-              legacyCategory: cat,
-            };
-          });
+          discounts.value = discountItems.map((d, idx) => ({
+            id: d.id || `disc-${idx}-${Date.now()}`,
+            name: d.name,
+            amount: Math.abs(d.unitPrice),
+            category: d.category || '',
+          }));
         }
       }
+      reconcileEditSelections();
     }
   },
   { immediate: true }
@@ -437,10 +494,14 @@ async function loadPaymentMethodsList() {
     const merged = new Set<string>([...DEFAULT_PAYMENT_METHODS, ...(Array.isArray(list) ? list : [])]);
     paymentMethodList.value = sortStringsNaturally(Array.from(merged));
     if (paymentMethodList.value.length === 0) {
-      paymentMethod.value = '__add_new__';
-      isAddingPayment.value = true;
-    } else {
-      if (!isEditMode.value || !paymentMethod.value || !paymentMethodList.value.includes(paymentMethod.value)) {
+      if (!isEditMode.value) {
+        paymentMethod.value = '__add_new__';
+        isAddingPayment.value = true;
+      } else {
+        paymentMethod.value = '';
+      }
+    } else if (!isEditMode.value) {
+      if (!paymentMethod.value || !paymentMethodList.value.includes(paymentMethod.value)) {
         paymentMethod.value = paymentMethodList.value[0];
         isAddingPayment.value = false;
       }
@@ -448,10 +509,14 @@ async function loadPaymentMethodsList() {
   } catch {
     paymentMethodList.value = [...DEFAULT_PAYMENT_METHODS];
     if (paymentMethodList.value.length === 0) {
-      paymentMethod.value = '__add_new__';
-      isAddingPayment.value = true;
-    } else {
-      if (!isEditMode.value || !paymentMethod.value || !paymentMethodList.value.includes(paymentMethod.value)) {
+      if (!isEditMode.value) {
+        paymentMethod.value = '__add_new__';
+        isAddingPayment.value = true;
+      } else {
+        paymentMethod.value = '';
+      }
+    } else if (!isEditMode.value) {
+      if (!paymentMethod.value || !paymentMethodList.value.includes(paymentMethod.value)) {
         paymentMethod.value = paymentMethodList.value[0];
         isAddingPayment.value = false;
       }
@@ -478,7 +543,10 @@ async function loadDistinctMerchants() {
 
 onMounted(async () => {
   await Promise.all([loadCategories(), loadPaymentMethodsList(), loadDistinctMerchants()]);
-  if (expenseCategoryList.value.length > 0 && items.value.length > 0 && !items.value[0].category) {
+  isListsLoaded.value = true;
+  if (isEditMode.value) {
+    reconcileEditSelections();
+  } else if (expenseCategoryList.value.length > 0 && items.value.length > 0 && !items.value[0].category) {
     items.value[0].category = expenseCategoryList.value[0];
   }
   await nextTick();
@@ -553,7 +621,7 @@ function addItem() {
     name: '',
     quantity: 1,
     unitPrice: 0,
-    category: expenseCategoryList.value[0] || '餐飲',
+    category: expenseCategoryList.value[0] || '',
   });
 }
 
@@ -655,6 +723,7 @@ function handleSelectMerchant(item: SelectItem<string>) {
  * 重設表單狀態為初始空白
  */
 function resetForm() {
+  clearValidationError();
   expenseDate.value = getTodayDateString();
   merchant.value = '';
   expenseNote.value = '';
@@ -664,7 +733,7 @@ function resetForm() {
       name: '',
       quantity: 1,
       unitPrice: 0,
-      category: expenseCategoryList.value[0] || '餐飲',
+      category: expenseCategoryList.value[0] || '',
     },
   ];
   discounts.value = [];
@@ -697,10 +766,99 @@ function handleCancelEdit() {
 }
 
 /**
+ * 驗證支出表單所有必填與數值邊界規則
+ */
+function validateExpenseForm(): boolean {
+  clearValidationError();
+
+  if (!expenseDate.value || !expenseDate.value.trim()) {
+    return setValidationError('date', '請選擇消費日期');
+  }
+
+  if (!merchant.value.trim()) {
+    return setValidationError('merchant', '請輸入店家名稱');
+  }
+
+  if (items.value.length === 0) {
+    return setValidationError('item-name-0', '請至少填寫一筆購買商品明細');
+  }
+
+  for (let idx = 0; idx < items.value.length; idx++) {
+    const it = items.value[idx];
+    if (!it.name.trim()) {
+      return setValidationError(`item-name-${idx}`, '請輸入商品品名');
+    }
+
+    const cat = it.category?.trim();
+    const isPendingNewCat =
+      showAddCategory.value &&
+      categoryTargetItemIndex.value === idx &&
+      newCategoryName.value.trim() !== '';
+
+    if (!isPendingNewCat && (!cat || cat === '__add_new__' || !expenseCategoryList.value.includes(cat))) {
+      if (showAddCategory.value && categoryTargetItemIndex.value === idx) {
+        return setValidationError('custom-category', '請輸入新支出分類名稱');
+      }
+      return setValidationError(`item-cat-${idx}`, '請選擇商品分類');
+    }
+
+    if (isBlankOrInvalidNumber(it.quantity) || Number(it.quantity) <= 0) {
+      return setValidationError(`item-qty-${idx}`, '商品數量必須大於 0');
+    }
+
+    if (isBlankOrInvalidNumber(it.unitPrice) || Number(it.unitPrice) < 0) {
+      return setValidationError(`item-price-${idx}`, '商品單價不可為空白或負數');
+    }
+  }
+
+  for (let dIdx = 0; dIdx < discounts.value.length; dIdx++) {
+    const d = discounts.value[dIdx];
+    if (!d.name.trim()) {
+      return setValidationError(`disc-name-${dIdx}`, '請輸入折扣名稱');
+    }
+    const discCat = d.category?.trim();
+    if (!discCat || !availableDiscountCategories.value.includes(discCat)) {
+      return setValidationError(`disc-cat-${dIdx}`, '請選擇有效的折扣分類');
+    }
+    if (isBlankOrInvalidNumber(d.amount) || Number(d.amount) <= 0) {
+      return setValidationError(`disc-amount-${dIdx}`, '折抵金額必須大於 0');
+    }
+  }
+
+  const rawPayment = paymentMethod.value?.trim() || '';
+  const isAddingState = isAddingPayment.value || rawPayment === '__add_new__';
+  if (isAddingState) {
+    if (!customPaymentName.value.trim()) {
+      return setValidationError('custom-payment', '請輸入新支付方式名稱');
+    }
+  } else if (!rawPayment || !paymentMethodList.value.includes(rawPayment)) {
+    return setValidationError('payment', '請選擇支付方式');
+  }
+
+  if (isForeignExpense.value) {
+    if (isBlankOrInvalidNumber(foreignExpenseAmount.value) || Number(foreignExpenseAmount.value) <= 0) {
+      return setValidationError('foreign-amount', '外幣金額必須大於 0');
+    }
+    if (isBlankOrInvalidNumber(netTwdAmount.value) || Number(netTwdAmount.value) < 0) {
+      return setValidationError('net-twd', '請輸入台幣扣款金額（可為 0，不可為負數）');
+    }
+    if (isBlankOrInvalidNumber(feeAmountInput.value) || Number(feeAmountInput.value) < 0) {
+      return setValidationError('fee', '請輸入手續費金額（可為 0，不可為負數）');
+    }
+  }
+
+  return true;
+}
+
+/**
  * 送出儲存消費支出記錄
  */
 async function handleSaveExpense() {
-  // 處理自訂分類建立（僅套用於主動觸發之品項，其餘維持既有或 fallback 其他）
+  if (!validateExpenseForm()) {
+    return;
+  }
+
+  // 若使用者正在新增分類且已填寫名稱，先建立並套用至對應品項
   if (showAddCategory.value) {
     const cleanCat = newCategoryName.value.trim();
     if (cleanCat) {
@@ -711,71 +869,45 @@ async function handleSaveExpense() {
     }
   }
 
-  // 處理自訂支付方式建立或未填 fallback「現金」
-  let finalPaymentMethod = paymentMethod.value?.trim() || '';
-  const isAddingState = isAddingPayment.value || finalPaymentMethod === '__add_new__' || !finalPaymentMethod;
+  // 處理支付方式（不允許靜默 fallback）
+  let finalPaymentMethod = paymentMethod.value.trim();
+  const isAddingState = isAddingPayment.value || finalPaymentMethod === '__add_new__';
   if (isAddingState) {
-    const cleanPay = customPaymentName.value.trim();
-    if (cleanPay) {
-      finalPaymentMethod = cleanPay;
-      try {
-        await addPaymentMethod(cleanPay);
-      } catch {
-        // 忽略已存在或重複錯誤
-      }
-    } else {
-      finalPaymentMethod = '現金';
-      try {
-        await addPaymentMethod('現金');
-      } catch {
-        // 若「現金」已存在於資料表，安全忽略重複錯誤
-      }
-    }
-  } else {
-    finalPaymentMethod = paymentMethod.value;
-  }
-
-  const expenseItems: ExpenseItem[] = [];
-
-  // 轉換購買商品項目（未填或 __add_new__ 堅固 fallback 為「其他」）
-  for (const it of items.value) {
-    if (it.name.trim() || it.unitPrice > 0) {
-      let itCategory = it.category?.trim();
-      if (!itCategory || itCategory === '__add_new__') {
-        itCategory = '其他';
-      }
-      expenseItems.push({
-        id: it.id,
-        type: 'item',
-        name: it.name || '商品',
-        quantity: Number(it.quantity) || 1,
-        unitPrice: Number(it.unitPrice) || 0,
-        subtotal: (Number(it.quantity) || 1) * (Number(it.unitPrice) || 0),
-        category: itCategory,
-      });
+    finalPaymentMethod = customPaymentName.value.trim();
+    try {
+      await addPaymentMethod(finalPaymentMethod);
+    } catch {
+      // 忽略已存在或重複錯誤
     }
   }
 
-  // 轉換折扣折抵項目（僅在同筆支出有商品分類時儲存；編輯舊資料保留之 legacyCategory 亦允許儲存）
-  if (availableDiscountCategories.value.length > 0) {
+  const expenseItems: ExpenseItem[] = items.value.map((it) => {
+    const qty = Number(it.quantity);
+    const price = Number(it.unitPrice);
+    return {
+      id: it.id,
+      type: 'item',
+      name: it.name.trim(),
+      quantity: qty,
+      unitPrice: price,
+      subtotal: qty * price,
+      category: it.category.trim(),
+    };
+  });
+
+  if (discounts.value.length > 0 && availableDiscountCategories.value.length > 0) {
     clampDiscountsToCategoryLimits();
     for (const d of discounts.value) {
-      if (d.name.trim() || d.amount > 0) {
-        let discCategory = d.category?.trim();
-        const isLegacy = Boolean(d.legacyCategory) && discCategory === d.legacyCategory;
-        if (!discCategory || (!availableDiscountCategories.value.includes(discCategory) && !isLegacy)) {
-          discCategory = availableDiscountCategories.value[0];
-        }
-        expenseItems.push({
-          id: d.id,
-          type: 'discount',
-          name: d.name || '折抵項目',
-          quantity: 1,
-          unitPrice: -(Number(d.amount) || 0),
-          subtotal: -(Number(d.amount) || 0),
-          category: discCategory,
-        });
-      }
+      const amt = Number(d.amount);
+      expenseItems.push({
+        id: d.id,
+        type: 'discount',
+        name: d.name.trim(),
+        quantity: 1,
+        unitPrice: -amt,
+        subtotal: -amt,
+        category: d.category.trim(),
+      });
     }
   }
 
@@ -784,13 +916,13 @@ async function handleSaveExpense() {
 
   const record: ExpenseRecord = {
     date: expenseDate.value,
-    merchant: merchant.value.trim() || '一般消費',
+    merchant: merchant.value.trim(),
     paymentMethod: finalPaymentMethod,
     totalAmount: totalExpenseAmount.value,
     isForeign: isForeignExpense.value,
     currency: isForeignExpense.value ? foreignExpenseCurrency.value : undefined,
-    foreignAmount: isForeignExpense.value ? Number(foreignExpenseAmount.value) || 0 : undefined,
-    netTwdAmount: isForeignExpense.value ? Number(netTwdAmount.value) || 0 : undefined,
+    foreignAmount: isForeignExpense.value ? Number(foreignExpenseAmount.value) : undefined,
+    netTwdAmount: isForeignExpense.value ? Number(netTwdAmount.value) : undefined,
     fee: feeAmount,
     exchangeRate: effectiveRate,
     invoiceNumber: invoiceNumber.value || undefined,
@@ -876,6 +1008,7 @@ async function handleSaveExpense() {
           id="expense-date"
           v-model="expenseDate"
           type="date"
+          :class="errorBorderClass('date')"
           class="w-full text-sm border border-slate-200 rounded-lg p-2 focus:ring-2 focus:ring-teal-500 focus:outline-none"
         />
       </div>
@@ -897,6 +1030,7 @@ async function handleSaveExpense() {
           type="text"
           list="merchant-options-list"
           placeholder="輸入店家名稱"
+          :class="errorBorderClass('merchant')"
           class="w-full text-sm border border-slate-200 rounded-lg p-2 focus:ring-2 focus:ring-teal-500 focus:outline-none"
         />
         <datalist id="merchant-options-list">
@@ -925,6 +1059,7 @@ async function handleSaveExpense() {
               v-model="item.name"
               type="text"
               placeholder="品名"
+              :class="errorBorderClass(`item-name-${idx}`)"
               class="w-full text-sm border border-slate-200 rounded-lg p-1.5 bg-white focus:ring-2 focus:ring-teal-500 focus:outline-none"
             />
           </div>
@@ -957,6 +1092,7 @@ async function handleSaveExpense() {
               :id="idx === 0 ? 'expense-category' : `item-cat-${idx}`"
               v-model="item.category"
               name="category"
+              :class="errorBorderClass(`item-cat-${idx}`)"
               class="w-full text-sm border border-slate-200 rounded-lg p-1.5 bg-white focus:ring-2 focus:ring-teal-500 focus:outline-none"
               @change="handleCategoryChange(idx, $event)"
             >
@@ -974,6 +1110,7 @@ async function handleSaveExpense() {
               type="number"
               min="1"
               placeholder="數量"
+              :class="errorBorderClass(`item-qty-${idx}`)"
               class="w-full text-sm border border-slate-200 rounded-lg p-1.5 bg-white focus:ring-2 focus:ring-teal-500 focus:outline-none"
               @focus="handleQuantityFocus"
             />
@@ -994,6 +1131,7 @@ async function handleSaveExpense() {
                 type="number"
                 min="0"
                 placeholder="單價"
+                :class="errorBorderClass(`item-price-${idx}`)"
                 class="w-full text-sm border border-slate-200 rounded-lg p-1.5 pl-8 bg-white focus:ring-2 focus:ring-teal-500 focus:outline-none"
               />
               <input
@@ -1019,7 +1157,8 @@ async function handleSaveExpense() {
             id="custom-expense-category-input"
             v-model="newCategoryName"
             type="text"
-            placeholder="輸入新分類名稱 (未填將自動預設為其他)"
+            placeholder="輸入新分類名稱"
+            :class="errorBorderClass('custom-category')"
             class="flex-1 text-xs border border-slate-300 rounded-lg p-2 bg-white focus:ring-2 focus:ring-teal-500 focus:outline-none"
           />
           <button
@@ -1089,6 +1228,7 @@ async function handleSaveExpense() {
                 v-model="disc.name"
                 type="text"
                 placeholder="折扣說明"
+                :class="errorBorderClass(`disc-name-${dIdx}`)"
                 class="w-full text-sm border border-slate-200 rounded-lg p-1.5 bg-white focus:ring-2 focus:ring-teal-500 focus:outline-none"
               />
             </div>
@@ -1097,6 +1237,7 @@ async function handleSaveExpense() {
               <select
                 :id="`disc-cat-${dIdx}`"
                 v-model="disc.category"
+                :class="errorBorderClass(`disc-cat-${dIdx}`)"
                 class="w-full text-sm border border-slate-200 rounded-lg p-1.5 bg-white focus:ring-2 focus:ring-teal-500 focus:outline-none"
                 @change="handleDiscountCategorySelectChange(dIdx)"
               >
@@ -1114,6 +1255,7 @@ async function handleSaveExpense() {
                 min="0"
                 :max="getMaxDiscountAmount(dIdx)"
                 placeholder="折抵金額"
+                :class="errorBorderClass(`disc-amount-${dIdx}`)"
                 class="w-full text-sm border border-slate-200 rounded-lg p-1.5 bg-white focus:ring-2 focus:ring-teal-500 focus:outline-none"
                 @input="handleDiscountAmountInput(dIdx, $event)"
               />
@@ -1132,6 +1274,7 @@ async function handleSaveExpense() {
           ref="paymentSelectRef"
           v-model="paymentMethod"
           name="expense-payment-method"
+          :class="errorBorderClass('payment')"
           class="w-full text-sm border border-slate-200 rounded-lg p-2 focus:ring-2 focus:ring-teal-500 focus:outline-none"
           @change="handlePaymentChange"
         >
@@ -1150,7 +1293,8 @@ async function handleSaveExpense() {
             id="custom-payment-input"
             v-model="customPaymentName"
             type="text"
-            placeholder="輸入新支付方式名稱 (未填將預設現金)"
+            placeholder="輸入新支付方式名稱"
+            :class="errorBorderClass('custom-payment')"
             class="w-full text-xs border border-teal-300 rounded-lg p-2 bg-teal-50/50 focus:ring-2 focus:ring-teal-500 focus:outline-none"
           />
         </div>
@@ -1192,8 +1336,11 @@ async function handleSaveExpense() {
             v-model.number="foreignExpenseAmount"
             type="number"
             step="any"
-            placeholder="外幣金額"
-            class="w-full text-sm border border-slate-200 rounded-lg p-2 bg-white focus:ring-2 focus:ring-teal-500 focus:outline-none"
+            readonly
+            aria-readonly="true"
+            placeholder="由商品明細扣除折扣自動帶入"
+            :class="errorBorderClass('foreign-amount')"
+            class="w-full text-sm border border-slate-200 rounded-lg p-2 bg-slate-100 text-slate-500 cursor-not-allowed focus:outline-none"
           />
         </div>
       </div>
@@ -1205,7 +1352,9 @@ async function handleSaveExpense() {
             id="net-twd-amount"
             v-model.number="netTwdAmount"
             type="number"
+            min="0"
             placeholder="台幣扣款"
+            :class="errorBorderClass('net-twd')"
             class="w-full text-sm border border-slate-200 rounded-lg p-2 bg-white focus:ring-2 focus:ring-teal-500 focus:outline-none"
           />
         </div>
@@ -1215,7 +1364,9 @@ async function handleSaveExpense() {
             id="expense-fee-amount"
             v-model.number="feeAmountInput"
             type="number"
+            min="0"
             placeholder="輸入手續費金額"
+            :class="errorBorderClass('fee')"
             class="w-full text-sm border border-slate-200 rounded-lg p-2 bg-white focus:ring-2 focus:ring-teal-500 focus:outline-none"
           />
         </div>
@@ -1237,6 +1388,11 @@ async function handleSaveExpense() {
         </div>
       </div>
     </div>
+
+    <!-- 錯誤提示 -->
+    <p v-if="errorMessage" id="expense-error-message" class="text-xs text-rose-600 font-medium text-right">
+      {{ errorMessage }}
+    </p>
 
     <!-- 總額計算與儲存/取消按鈕 -->
     <div class="pt-4 border-t border-slate-100 flex items-center justify-between">

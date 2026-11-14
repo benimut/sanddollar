@@ -29,7 +29,7 @@ import {
   generateCategoryPieData,
   generateStackedBarData,
   extractAvailableMonths,
-  filterMonthsByCustomRange,
+  expandMonthRange,
   type StackedBarDataset,
 } from '@/utils/report';
 import type { ExpenseRecord, IncomeRecord, MonthlyReward, FinancialSummary } from '@/types';
@@ -57,16 +57,20 @@ const summary = ref<FinancialSummary>({
   balance: 0,
 });
 
-// 當前月份（格式 YYYY-MM）
+// 當前月份（格式 YYYY-MM）與今年預設區間
 const currentMonth = getCurrentMonthString();
+const currentYear = currentMonth.slice(0, 4);
+const defaultStartMonth = `${currentYear}-01`;
+const defaultEndMonth = `${currentYear}-12`;
 
-// 財務摘要選取之月份（預設為當前月份）
+// 財務摘要選取之月份（必填，預設為當前月份）
 const selectedMonth = ref<string>(currentMonth);
 
-// 長條圖自訂區間篩選月份狀態
-const rangeStartMonth = ref<string>('');
-const rangeEndMonth = ref<string>('');
-const activeQuickRange = ref<'3' | '6' | '12' | 'all' | 'custom'>('all');
+// 長條圖自訂區間篩選月份狀態（必填，預設為今年 01~12 月）
+const rangeStartMonth = ref<string>(defaultStartMonth);
+const rangeEndMonth = ref<string>(defaultEndMonth);
+const activeQuickRange = ref<'3' | '6' | '12' | 'all' | 'custom'>('custom');
+const rangeErrorMessage = ref('');
 
 /**
  * 可選月份清單：由消費、收入與回饋記錄中提取不重複的 YYYY-MM，
@@ -222,9 +226,18 @@ function renderPieChart() {
  */
 function setQuickRange(type: '3' | '6' | '12' | 'all') {
   activeQuickRange.value = type;
+  rangeErrorMessage.value = '';
   if (type === 'all') {
-    rangeStartMonth.value = '';
-    rangeEndMonth.value = '';
+    const allAscMonths = extractAvailableMonths(expenses.value, incomes.value, rewards.value, {
+      order: 'asc',
+    });
+    if (allAscMonths.length > 0) {
+      rangeStartMonth.value = allAscMonths[0];
+      rangeEndMonth.value = allAscMonths[allAscMonths.length - 1];
+    } else {
+      rangeStartMonth.value = defaultStartMonth;
+      rangeEndMonth.value = defaultEndMonth;
+    }
     renderBarChart();
     return;
   }
@@ -242,28 +255,25 @@ function setQuickRange(type: '3' | '6' | '12' | 'all') {
 function renderBarChart() {
   if (!barCanvasRef.value) return;
 
+  if (!rangeStartMonth.value || !rangeEndMonth.value) {
+    rangeErrorMessage.value = '請選擇起訖月份區間';
+    return;
+  }
+  rangeErrorMessage.value = '';
+
   if (barChartInstance) {
     barChartInstance.destroy();
     barChartInstance = null;
   }
 
-  // 取得升冪排序之全月份
-  const allAscMonths = extractAvailableMonths(expenses.value, incomes.value, rewards.value, {
-    order: 'asc',
-  });
-
-  // 透過自訂區間篩選月份清單
-  const filteredMonths = filterMonthsByCustomRange(
-    allAscMonths,
-    rangeStartMonth.value,
-    rangeEndMonth.value
-  );
+  // 依所選起訖區間展開連續月份（無資料的月份數值為 0，不退回全部歷史資料）
+  const targetMonths = expandMonthRange(rangeStartMonth.value, rangeEndMonth.value);
 
   const barData = generateStackedBarData(
     expenses.value,
     incomes.value,
     rewards.value,
-    filteredMonths.length > 0 ? filteredMonths : undefined
+    targetMonths
   );
 
   // 同步建立分組圖例項目（依 stack/categoryType 分類）
@@ -325,8 +335,12 @@ function renderBarChart() {
   });
 }
 
-// 監聽 selectedMonth 變更即時重算財務摘要
-watch(selectedMonth, () => {
+// 監聽 selectedMonth 變更即時重算財務摘要（不可為空，若被清空則自動重設為當月）
+watch(selectedMonth, (val) => {
+  if (!val) {
+    selectedMonth.value = currentMonth;
+    return;
+  }
   updateSummary();
 });
 
@@ -335,8 +349,18 @@ watch(pieMode, () => {
   renderPieChart();
 });
 
-// 監聽自訂起訖月份變更即時重繪長條圖
-watch([rangeStartMonth, rangeEndMonth], () => {
+// 監聽自訂起訖月份變更即時重繪長條圖（不允許清空，若清空則自動補回今年預設值並提示）
+watch([rangeStartMonth, rangeEndMonth], ([start, end]) => {
+  if (!start) {
+    rangeStartMonth.value = defaultStartMonth;
+    rangeErrorMessage.value = '起始月份不可留空，已重設為今年 1 月';
+    return;
+  }
+  if (!end) {
+    rangeEndMonth.value = defaultEndMonth;
+    rangeErrorMessage.value = '結束月份不可留空，已重設為今年 12 月';
+    return;
+  }
   renderBarChart();
 });
 
@@ -363,10 +387,11 @@ onUnmounted(() => {
       <div class="flex items-center justify-between">
         <h2 class="text-base font-bold text-slate-800">財務核心摘要</h2>
 
-        <!-- 月份下拉選單 (依月份降冪排序) -->
+        <!-- 月份下拉選單 (依月份降冪排序，必填) -->
         <select
           id="summary-month-select"
           v-model="selectedMonth"
+          required
           class="text-xs border border-slate-200 rounded-lg px-2.5 py-1 bg-slate-50 text-slate-700 font-medium focus:ring-2 focus:ring-teal-500 focus:outline-none"
         >
           <option v-for="m in availableMonths" :key="m" :value="m">{{ m }}</option>
@@ -476,24 +501,33 @@ onUnmounted(() => {
           </div>
         </div>
 
-        <!-- 自訂起訖月份輸入項 -->
-        <div class="flex items-center gap-2 p-2.5 bg-slate-50 rounded-xl border border-slate-100 text-xs">
-          <span class="text-slate-500 font-medium">區間：</span>
-          <input
-            id="report-start-month"
-            v-model="rangeStartMonth"
-            type="month"
-            class="border border-slate-200 rounded-lg p-1 text-xs bg-white text-slate-700"
-            @change="activeQuickRange = 'custom'"
-          />
-          <span class="text-slate-400">至</span>
-          <input
-            id="report-end-month"
-            v-model="rangeEndMonth"
-            type="month"
-            class="border border-slate-200 rounded-lg p-1 text-xs bg-white text-slate-700"
-            @change="activeQuickRange = 'custom'"
-          />
+        <!-- 自訂起訖月份輸入項 (必填，預設今年) -->
+        <div class="space-y-1">
+          <div class="flex items-center gap-2 p-2.5 bg-slate-50 rounded-xl border border-slate-100 text-xs">
+            <span class="text-slate-500 font-medium">區間：</span>
+            <input
+              id="report-start-month"
+              v-model="rangeStartMonth"
+              type="month"
+              required
+              :class="!rangeStartMonth ? 'border-rose-500 ring-2 ring-rose-200' : 'border-slate-200'"
+              class="border rounded-lg p-1 text-xs bg-white text-slate-700"
+              @change="activeQuickRange = 'custom'"
+            />
+            <span class="text-slate-400">至</span>
+            <input
+              id="report-end-month"
+              v-model="rangeEndMonth"
+              type="month"
+              required
+              :class="!rangeEndMonth ? 'border-rose-500 ring-2 ring-rose-200' : 'border-slate-200'"
+              class="border rounded-lg p-1 text-xs bg-white text-slate-700"
+              @change="activeQuickRange = 'custom'"
+            />
+          </div>
+          <p v-if="rangeErrorMessage" id="report-range-error" class="text-xs text-rose-600 font-medium">
+            {{ rangeErrorMessage }}
+          </p>
         </div>
       </div>
 

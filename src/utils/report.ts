@@ -311,8 +311,8 @@ export function generateStackedBarData(
   rewards: MonthlyReward[],
   months?: string[]
 ): StackedBarChartData {
-  // 若有外部指定月份，依指定清單生成；未指定時自動擷取不重複月份並升冪排序
-  const targetMonths: string[] = (months && months.length > 0)
+  // 若有外部指定月份陣列（含空陣列），依指定清單生成；未傳入 (undefined) 時自動擷取不重複月份並升冪排序
+  const targetMonths: string[] = Array.isArray(months)
     ? [...months]
     : extractAvailableMonths(expenses, incomes, rewards, { order: 'asc' });
 
@@ -449,4 +449,45 @@ export function filterMonthsByCustomRange(
     if (end && m > end) return false;
     return true;
   });
+}
+
+/**
+ * 依起訖月份展開連續月份陣列 (格式 YYYY-MM)
+ * 若起訖顛倒會自動對調；若格式無效則回傳空陣列
+ *
+ * @param startMonth 起始月份 (YYYY-MM)
+ * @param endMonth 結束月份 (YYYY-MM)
+ * @returns 升冪排列之連續月份字串陣列
+ */
+export function expandMonthRange(startMonth: string, endMonth: string): string[] {
+  let start = parseValidYearMonth(startMonth);
+  let end = parseValidYearMonth(endMonth);
+  if (!start || !end) {
+    return [];
+  }
+
+  if (start > end) {
+    const temp = start;
+    start = end;
+    end = temp;
+  }
+
+  const [startYear, startMon] = start.split('-').map(Number);
+  const [endYear, endMon] = end.split('-').map(Number);
+
+  const result: string[] = [];
+  let y = startYear;
+  let m = startMon;
+  const maxMonths = 1200; // 安全上限：100 年
+
+  while ((y < endYear || (y === endYear && m <= endMon)) && result.length < maxMonths) {
+    result.push(`${y}-${String(m).padStart(2, '0')}`);
+    m += 1;
+    if (m > 12) {
+      m = 1;
+      y += 1;
+    }
+  }
+
+  return result;
 }
