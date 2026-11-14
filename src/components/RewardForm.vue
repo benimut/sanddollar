@@ -45,9 +45,44 @@ const sourceName = ref('');
 const amount = ref<number | ''>('');
 const note = ref('');
 const errorMessage = ref('');
+const errorField = ref('');
+
+function setValidationError(field: string, message: string): false {
+  errorField.value = field;
+  errorMessage.value = message;
+  return false;
+}
+
+function clearValidationError() {
+  errorField.value = '';
+  errorMessage.value = '';
+}
+
+function errorBorderClass(field: string): string {
+  return errorField.value === field ? 'border-rose-500 ring-2 ring-rose-200' : '';
+}
+
+const isListsLoaded = ref(false);
+
+/**
+ * 編輯模式下比對回饋來源設定清單，若已不存在則清空留空
+ */
+function reconcileEditSelections() {
+  if (!isEditMode.value || !isListsLoaded.value) return;
+  if (
+    selectedSourceOption.value &&
+    selectedSourceOption.value !== '__add_new__' &&
+    !distinctRewardSources.value.includes(selectedSourceOption.value)
+  ) {
+    selectedSourceOption.value = '';
+    sourceName.value = '';
+  }
+}
 
 onMounted(async () => {
   await loadDistinctRewardSources();
+  isListsLoaded.value = true;
+  reconcileEditSelections();
 });
 
 /**
@@ -65,14 +100,16 @@ async function loadDistinctRewardSources() {
 watch(
   () => props.editData,
   (data) => {
+    clearValidationError();
     if (data) {
-      rewardMonth.value = data.yearMonth || getCurrentMonthString();
+      rewardMonth.value = data.yearMonth || '';
       sourceName.value = data.sourceName || '';
       selectedSourceOption.value = data.sourceName || '';
       isAddingSource.value = false;
       customSourceName.value = '';
       amount.value = data.amount ?? '';
       note.value = data.note || '';
+      reconcileEditSelections();
     }
   },
   { immediate: true }
@@ -105,6 +142,7 @@ function handleCustomSourceInput(e: Event) {
  * 清空表單狀態
  */
 function resetForm() {
+  clearValidationError();
   rewardMonth.value = getCurrentMonthString();
   sourceName.value = '';
   selectedSourceOption.value = '';
@@ -112,7 +150,6 @@ function resetForm() {
   customSourceName.value = '';
   amount.value = '';
   note.value = '';
-  errorMessage.value = '';
 }
 
 /**
@@ -127,26 +164,38 @@ function handleCancelEdit() {
  * 處理儲存回饋登記
  */
 async function handleSaveReward() {
-  let cleanSource = sourceName.value.trim();
-  if (isAddingSource.value && customSourceName.value.trim()) {
+  clearValidationError();
+
+  if (!rewardMonth.value || !rewardMonth.value.trim()) {
+    setValidationError('month', '請選擇回饋月份');
+    return;
+  }
+
+  const rawAmt = amount.value;
+  const numAmount = Number(rawAmt);
+  if (rawAmt === '' || rawAmt === null || rawAmt === undefined || Number.isNaN(numAmount) || numAmount <= 0) {
+    setValidationError('amount', '回饋金額必須大於 0');
+    return;
+  }
+
+  let cleanSource = '';
+  const isAddingState = isAddingSource.value || selectedSourceOption.value === '__add_new__';
+  if (isAddingState) {
     cleanSource = customSourceName.value.trim();
+    if (!cleanSource) {
+      setValidationError('custom-source', '請輸入回饋來源');
+      return;
+    }
+  } else {
+    cleanSource = selectedSourceOption.value?.trim() || sourceName.value.trim();
+    if (!cleanSource || !distinctRewardSources.value.includes(cleanSource)) {
+      setValidationError('source', '請輸入回饋來源');
+      return;
+    }
   }
-  const numAmount = Number(amount.value) || 0;
-
-  if (!cleanSource || cleanSource === '__add_new__') {
-    errorMessage.value = '請輸入回饋來源';
-    return;
-  }
-
-  if (numAmount <= 0) {
-    errorMessage.value = '回饋金額必須大於 0';
-    return;
-  }
-
-  errorMessage.value = '';
 
   // 若使用者選取新增來源或自訂輸入名稱非空，自動持久化至回饋來源設定表
-  if (isAddingSource.value || (customSourceName.value.trim() && customSourceName.value.trim() === cleanSource)) {
+  if (isAddingState) {
     try {
       await addRewardSource(cleanSource);
     } catch {
@@ -187,6 +236,7 @@ async function handleSaveReward() {
           id="reward-month"
           v-model="rewardMonth"
           type="month"
+          :class="errorBorderClass('month')"
           class="w-full text-sm border border-slate-200 rounded-lg p-2 focus:ring-2 focus:ring-teal-500 focus:outline-none"
         />
       </div>
@@ -198,6 +248,7 @@ async function handleSaveReward() {
           type="number"
           min="1"
           placeholder="回饋金額"
+          :class="errorBorderClass('amount')"
           class="w-full text-sm border border-slate-200 rounded-lg p-2 focus:ring-2 focus:ring-teal-500 focus:outline-none"
         />
       </div>
@@ -210,6 +261,7 @@ async function handleSaveReward() {
         <select
           id="reward-source-select"
           v-model="selectedSourceOption"
+          :class="errorBorderClass('source')"
           class="w-full text-sm border border-slate-200 rounded-lg p-2 bg-white focus:ring-2 focus:ring-teal-500 focus:outline-none"
           @change="handleSourceSelectChange"
         >
@@ -225,6 +277,7 @@ async function handleSaveReward() {
             v-model="customSourceName"
             type="text"
             placeholder="輸入新回饋來源名稱"
+            :class="errorBorderClass('custom-source')"
             class="w-full text-xs border border-teal-300 rounded-lg p-2 bg-teal-50/50 focus:ring-2 focus:ring-teal-500 focus:outline-none"
             @input="handleCustomSourceInput"
           />

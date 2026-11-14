@@ -388,7 +388,7 @@ describe('Milestone 5: TransactionForm 模組化拆分與歷史選單單元測�
       }
     });
 
-    it('選取「+ 新增收入來源...」但未填寫自訂名稱直接儲存，收入來源安全 fallback 為「未分類收入」', async () => {
+    it('選取「+ 新增收入來源...」但未填寫自訂名稱直接儲存，應阻擋儲存並顯示錯誤提示', async () => {
       const { container, cleanup } = mountComponent(IncomeForm);
       await flushAsync();
 
@@ -410,10 +410,9 @@ describe('Milestone 5: TransactionForm 模組化拆分與歷史選單單元測�
         submitBtn.click();
         await flushAsync();
 
-        // 4. 驗證 addIncome 安全 fallback 為「未分類收入」
-        expect(dbModule.addIncome).toHaveBeenCalled();
-        const callArg = vi.mocked(dbModule.addIncome).mock.calls[0][0];
-        expect(callArg.source, '未填寫自訂收入來源時應 fallback 為「未分類收入」').toBe('未分類收入');
+        // 4. 驗證阻擋儲存並顯示錯誤訊息
+        expect(dbModule.addIncome).not.toHaveBeenCalled();
+        expect(container.querySelector('#income-error-message')?.textContent).toContain('請輸入新收入來源名稱');
       } finally {
         cleanup();
       }
@@ -497,6 +496,13 @@ describe('Milestone 5: TransactionForm 模組化拆分與歷史選單單元測�
         if (priceInput) {
           priceInput.value = '35';
           priceInput.dispatchEvent(new Event('input'));
+        }
+
+        // 若未預設支付方式（例如清單為空處於 __add_new__），填入自訂支付方式以通過必填驗證
+        const customPayInput = container.querySelector('#custom-payment-input') as HTMLInputElement | null;
+        if (customPayInput) {
+          customPayInput.value = '現金';
+          customPayInput.dispatchEvent(new Event('input'));
         }
 
         await flushAsync();
@@ -608,10 +614,28 @@ describe('Milestone 5: TransactionForm 模組化拆分與歷史選單單元測�
     });
 
     it('儲存成功後應在介面上呈現暫時的成功提示訊息', async () => {
+      vi.mocked(dbModule.getPaymentMethods).mockResolvedValue(['現金']);
       const { container, cleanup } = mountComponent(TransactionForm);
       await flushAsync();
 
       try {
+        const merchantInput = container.querySelector('#merchant-input') as HTMLInputElement;
+        if (merchantInput) {
+          merchantInput.value = '全家';
+          merchantInput.dispatchEvent(new Event('input'));
+        }
+        const nameInput = container.querySelector('#expense-name') as HTMLInputElement;
+        if (nameInput) {
+          nameInput.value = '紅茶';
+          nameInput.dispatchEvent(new Event('input'));
+        }
+        const priceInput = container.querySelector('#expense-amount') as HTMLInputElement;
+        if (priceInput) {
+          priceInput.value = '25';
+          priceInput.dispatchEvent(new Event('input'));
+        }
+        await flushAsync();
+
         const submitBtn = (container.querySelector('#btn-submit-expense') ||
           Array.from(container.querySelectorAll('button')).find((b) =>
             b.textContent?.includes('儲存')
@@ -649,15 +673,20 @@ describe('Milestone 5: TransactionForm 模組化拆分與歷史選單單元測�
           foreignCheckbox.dispatchEvent(new Event('change'));
           await flushAsync();
 
-          // 輸入外幣金額 100，台幣扣款 3200
+          // 透過商品明細單價輸入 100，自動同步外幣金額 100，再輸入台幣扣款 3200
+          const itemPriceInput = (container.querySelector('#expense-amount') ||
+            container.querySelector('input[placeholder="單價"]')) as HTMLInputElement;
           const foreignAmountInput = (container.querySelector('#foreign-expense-amount') ||
             container.querySelector('input[placeholder*="外幣金額"]')) as HTMLInputElement;
           const netTwdInput = (container.querySelector('#net-twd-amount') ||
             container.querySelector('input[placeholder*="台幣扣款"]')) as HTMLInputElement;
 
-          if (foreignAmountInput && netTwdInput) {
-            foreignAmountInput.value = '100';
-            foreignAmountInput.dispatchEvent(new Event('input'));
+          if (itemPriceInput && foreignAmountInput && netTwdInput) {
+            itemPriceInput.value = '100';
+            itemPriceInput.dispatchEvent(new Event('input'));
+            await flushAsync();
+            expect(foreignAmountInput.value).toBe('100');
+
             netTwdInput.value = '3200';
             netTwdInput.dispatchEvent(new Event('input'));
 
@@ -733,6 +762,7 @@ describe('Milestone 5: TransactionForm 模組化拆分與歷史選單單元測�
     // 情境 1: 【支出新增分類隔離】
     // -----------------------------------------------------------------------
     it('情境 1【支出新增分類隔離】：在有多筆商品時，新增商品 2 並點選「+ 新增分類」建立「新玩具」，商品 1 不會被自動改為「新玩具」，儲存時商品 1 正確 fallback 為「其他」', async () => {
+      vi.mocked(dbModule.getPaymentMethods).mockResolvedValue(['現金']);
       const { container, cleanup } = mountComponent(ExpenseForm);
       await flushAsync();
 
@@ -797,18 +827,30 @@ describe('Milestone 5: TransactionForm 模組化拆分與歷史選單單元測�
         confirmCatBtn.click();
         await flushAsync();
 
-        // 5. 驗證商品 1 的分類沒有被自動修改為「新玩具」
+        // 5. 驗證商品 1 的分類沒有被自動修改為「新玩具」，且若商品 1 未選分類時會阻擋儲存
         expect(catSelect0.value, '商品 1 分類絕不可被自動污染改為「新玩具」').not.toBe('新玩具');
 
-        // 6. 點擊「儲存」按鈕
+        const merchantInput = container.querySelector('#merchant-input') as HTMLInputElement;
+        merchantInput.value = '測試商店';
+        merchantInput.dispatchEvent(new Event('input'));
+        await flushAsync();
+
+        // 6. 點擊「儲存」按鈕，因商品 1 未選分類應被阻擋
         const submitBtn = (container.querySelector('#btn-submit-expense') ||
           Array.from(container.querySelectorAll('button')).find((b) =>
             b.textContent?.includes('儲存')
           )) as HTMLButtonElement;
         submitBtn.click();
         await flushAsync();
+        expect(dbModule.addExpense).not.toHaveBeenCalled();
 
-        // 7. 驗證儲存至資料庫的內容：商品 1 fallback 為「其他」，商品 2 為「新玩具」
+        // 7. 為商品 1 選取「餐飲」分類後再儲存，驗證兩筆商品各自保有正確分類
+        catSelect0.value = '餐飲';
+        catSelect0.dispatchEvent(new Event('change'));
+        await flushAsync();
+        submitBtn.click();
+        await flushAsync();
+
         expect(dbModule.addExpense).toHaveBeenCalled();
         const savedRecord = vi.mocked(dbModule.addExpense).mock.calls[0][0];
         const item1 = savedRecord.items.find((i) => i.name === '經典美式');
@@ -816,7 +858,7 @@ describe('Milestone 5: TransactionForm 模組化拆分與歷史選單單元測�
 
         expect(item1, '儲存記錄應包含商品 1').toBeDefined();
         expect(item2, '儲存記錄應包含商品 2').toBeDefined();
-        expect(item1?.category, '商品 1 未選分類時儲存應正確 fallback 為「其他」').toBe('其他');
+        expect(item1?.category, '商品 1 應為「餐飲」').toBe('餐飲');
         expect(item2?.category, '商品 2 建立新分類後儲存應為「新玩具」').toBe('新玩具');
       } finally {
         cleanup();
@@ -971,10 +1013,7 @@ describe('Milestone 5: TransactionForm 模組化拆分與歷史選單單元測�
     // -----------------------------------------------------------------------
     // 情境 4: 【分類與支付方式未填健全 Fallback】
     // -----------------------------------------------------------------------
-    it('情境 4【分類與支付方式未填健全 Fallback】：商品分類未選或選取 __add_new__ 但未填時 fallback「其他」，支付方式未選或選取 __add_new__ 但未填時 fallback「現金」', async () => {
-      // 驗證規格 2.4:
-      // 當商品分類值為空字串、空白字串或 '__add_new__' 時，儲存時強制 fallback 為「其他」
-      // 當支付方式未選擇、值為空、空白字串或選取 '__add_new__' 且未填自訂名稱時，儲存結果必須 fallback 為「現金」
+    it('情境 4【分類與支付方式未填阻擋儲存】：商品分類未選或選取 __add_new__ 但未填、或支付方式選取 __add_new__ 但未填時，應阻擋儲存並顯示錯誤提示', async () => {
       const mockEditData = {
         id: 505,
         date: '2026-11-05',
@@ -999,18 +1038,8 @@ describe('Milestone 5: TransactionForm 模組化拆分與歷史選單單元測�
         submitBtn.click();
         await flushAsync();
 
-        expect(dbModule.updateExpense).toHaveBeenCalled();
-        const updateCall = vi.mocked(dbModule.updateExpense).mock.calls[0][1];
-
-        expect(
-          updateCall.items[0]?.category,
-          '支出商品分類選取 __add_new__ 但未填時，儲存結果中該商品的 category 必須 fallback 為「其他」'
-        ).toBe('其他');
-
-        expect(
-          updateCall.paymentMethod,
-          '支出支付方式選取 __add_new__ 但未填時，儲存結果中 paymentMethod 必須 fallback 為「現金」'
-        ).toBe('現金');
+        expect(dbModule.updateExpense).not.toHaveBeenCalled();
+        expect(container.querySelector('#expense-error-message')?.textContent).toBeTruthy();
       } finally {
         cleanup();
       }
@@ -1229,7 +1258,7 @@ describe('Milestone 5: TransactionForm 模組化拆分與歷史選單單元測�
         }
       });
 
-      it('規格 4【未填直接儲存之 Fallback 與自動持久化】：當選項處於新增狀態且未填自訂名稱直接儲存時，送出之支出記錄 paymentMethod 安全 fallback 為「現金」，且同時將「現金」新增至 IndexedDB paymentMethods 資料表', async () => {
+      it('規格 4【未填支付方式名稱阻擋儲存】：當選項處於新增狀態且未填自訂名稱直接儲存時，應阻擋儲存並提示錯誤，不呼叫 addExpense 與 addPaymentMethod', async () => {
         vi.mocked(dbModule.getPaymentMethods).mockResolvedValue([]);
 
         const { container, cleanup } = mountComponent(ExpenseForm);
@@ -1238,7 +1267,10 @@ describe('Milestone 5: TransactionForm 模組化拆分與歷史選單單元測�
         try {
           const paySelect = container.querySelector('#payment-method') as HTMLSelectElement | null;
           expect(paySelect, '應存在支付方式選單 #payment-method').not.toBeNull();
-          expect(paySelect!.value, '無支付方式記錄時自動處於 __add_new__ 狀態').toBe('__add_new__');
+
+          paySelect!.value = '__add_new__';
+          paySelect!.dispatchEvent(new Event('change'));
+          await flushAsync();
 
           // 輸入店家名稱、品項名稱與單價，但自訂支付方式輸入框未填寫任何名稱
           const merchantInput = container.querySelector('#merchant-input') as HTMLInputElement;
@@ -1264,25 +1296,16 @@ describe('Milestone 5: TransactionForm 模組化拆分與歷史選單單元測�
           submitBtn.click();
           await flushAsync();
 
-          // 驗證 addExpense 寫入記錄
-          expect(dbModule.addExpense, '應成功調用 addExpense').toHaveBeenCalled();
-          const savedExpense = vi.mocked(dbModule.addExpense).mock.calls[0][0];
-          expect(
-            savedExpense.paymentMethod,
-            '未填自訂名稱直接儲存時，expense 記錄中 paymentMethod 必須 fallback 為「現金」'
-          ).toBe('現金');
-
-          // 驗證自動持久化至 paymentMethods 資料表
-          expect(
-            dbModule.addPaymentMethod,
-            '必須同時將「現金」寫入 IndexedDB paymentMethods 資料表'
-          ).toHaveBeenCalledWith('現金');
+          // 驗證阻擋儲存並顯示錯誤提示
+          expect(dbModule.addExpense).not.toHaveBeenCalled();
+          expect(dbModule.addPaymentMethod).not.toHaveBeenCalled();
+          expect(container.querySelector('#expense-error-message')?.textContent).toContain('請輸入新支付方式名稱');
         } finally {
           cleanup();
         }
       });
 
-      it('規格 4 延伸【選取新增但未填名稱直接儲存】：paymentMethod 亦 fallback 為「現金」且自動持久化至資料庫', async () => {
+      it('規格 4 延伸【選取新增並填寫自訂名稱】：應成功寫入自訂 paymentMethod 並自動持久化至資料庫', async () => {
         vi.mocked(dbModule.getPaymentMethods).mockResolvedValue([]);
 
         const { container, cleanup } = mountComponent(ExpenseForm);
@@ -1297,14 +1320,19 @@ describe('Milestone 5: TransactionForm 模組化拆分與歷史選單單元測�
           paySelect!.dispatchEvent(new Event('change'));
           await flushAsync();
 
-          // 輸入店家名稱、品項名稱與單價，但不填寫自訂支付方式名稱
+          const customPayInput = container.querySelector('#custom-payment-input') as HTMLInputElement;
+          expect(customPayInput).not.toBeNull();
+          customPayInput.value = '街口支付';
+          customPayInput.dispatchEvent(new Event('input'));
+
+          // 輸入店家名稱、品項名稱與單價
           const merchantInput = container.querySelector('#merchant-input') as HTMLInputElement;
-          merchantInput.value = '自訂未填測試店家';
+          merchantInput.value = '自訂測試店家';
           merchantInput.dispatchEvent(new Event('input'));
 
           const nameInput = (container.querySelector('#expense-name') ||
             container.querySelector('input[placeholder*="品名"]')) as HTMLInputElement;
-          nameInput.value = '自訂未填品項';
+          nameInput.value = '自訂品項';
           nameInput.dispatchEvent(new Event('input'));
 
           const priceInput = (container.querySelector('#expense-amount') ||
@@ -1321,19 +1349,10 @@ describe('Milestone 5: TransactionForm 模組化拆分與歷史選單單元測�
           submitBtn.click();
           await flushAsync();
 
-          // 驗證 addExpense 寫入記錄中 fallback 為「現金」
-          expect(dbModule.addExpense, '應成功調用 addExpense').toHaveBeenCalled();
+          expect(dbModule.addExpense).toHaveBeenCalled();
           const savedExpense = vi.mocked(dbModule.addExpense).mock.calls[0][0];
-          expect(
-            savedExpense.paymentMethod,
-            '選取 __add_new__ 但未填名稱直接送出時，paymentMethod 必須 fallback 為「現金」'
-          ).toBe('現金');
-
-          // 驗證自動持久化至 paymentMethods 資料表
-          expect(
-            dbModule.addPaymentMethod,
-            '必須同時將「現金」寫入 IndexedDB paymentMethods 資料表'
-          ).toHaveBeenCalledWith('現金');
+          expect(savedExpense.paymentMethod).toBe('街口支付');
+          expect(dbModule.addPaymentMethod).toHaveBeenCalledWith('街口支付');
         } finally {
           cleanup();
         }
@@ -1341,12 +1360,16 @@ describe('Milestone 5: TransactionForm 模組化拆分與歷史選單單元測�
     });
 
     describe('8.3 規格 v2.0: 商品分類選中新增才展開輸入框與海外手填金額保護', () => {
-      it('選取「+ 新增分類...」時展開輸入框，未填寫自訂名稱直接儲存時安全 fallback 為「其他」', async () => {
+      it('選取「+ 新增分類...」時展開輸入框，未填寫自訂名稱直接儲存時應阻擋儲存並顯示錯誤提示', async () => {
         const { container, cleanup } = mountComponent(ExpenseForm);
         await flushAsync();
 
         try {
-          // 1. 填寫品名與單價
+          // 1. 填寫店家、品名與單價
+          const merchantInput = container.querySelector('#merchant-input') as HTMLInputElement;
+          merchantInput.value = '飲品店';
+          merchantInput.dispatchEvent(new Event('input'));
+
           const nameInput0 = (container.querySelector('#expense-name') ||
             container.querySelector('input[placeholder*="品名"]')) as HTMLInputElement;
           const priceInput0 = (container.querySelector('#expense-amount') ||
@@ -1371,21 +1394,16 @@ describe('Milestone 5: TransactionForm 模組化拆分與歷史選單單元測�
           submitBtn.click();
           await flushAsync();
 
-          // 4. 驗證儲存至資料庫的記錄中，該第一筆商品的分類安全 fallback 為「其他」
-          expect(dbModule.addExpense).toHaveBeenCalled();
-          const savedRecord = vi.mocked(dbModule.addExpense).mock.calls[0][0];
-          const item = savedRecord.items.find((i: any) => i.name === '特調飲品');
-          expect(item, '儲存記錄中應包含特調飲品').toBeDefined();
-          expect(
-            item?.category,
-            '選取新增分類但未填寫直接儲存時，商品分類必須安全 fallback 為「其他」'
-          ).toBe('其他');
+          // 4. 驗證阻擋儲存並顯示錯誤訊息
+          expect(dbModule.addExpense).not.toHaveBeenCalled();
+          expect(container.querySelector('#expense-error-message')?.textContent).toContain('請輸入新支出分類名稱');
         } finally {
           cleanup();
         }
       });
 
-      it('海外支出模式下，在未填寫商品明細（商品小計為 0）時，使用者手填 #foreign-expense-amount 金額不會被 Watcher 清空或重設為 0', async () => {
+      it('海外支出模式下，#foreign-expense-amount 應為唯讀且自動同步商品明細扣除折扣後的金額', async () => {
+        vi.mocked(dbModule.getPaymentMethods).mockResolvedValue(['現金']);
         const { container, cleanup } = mountComponent(ExpenseForm);
         await flushAsync();
 
@@ -1400,25 +1418,32 @@ describe('Milestone 5: TransactionForm 模組化拆分與歷史選單單元測�
 
           const foreignAmountInput = container.querySelector('#foreign-expense-amount') as HTMLInputElement | null;
           expect(foreignAmountInput, '海外模式下應存在 #foreign-expense-amount 外幣金額輸入框').not.toBeNull();
+          expect(foreignAmountInput!.readOnly, '#foreign-expense-amount 必須為唯讀').toBe(true);
+          expect(foreignAmountInput!.getAttribute('aria-readonly')).toBe('true');
 
-          // 2. 使用者在商品小計為 0（僅填品名與分類、單價為 0）時，手填外幣金額 100
+          // 2. 填寫店家與商品（單價 120）
+          const merchantInput = container.querySelector('#merchant-input') as HTMLInputElement;
+          merchantInput.value = '海外免稅店';
+          merchantInput.dispatchEvent(new Event('input'));
+
           const itemNameInput = container.querySelector('#expense-name') as HTMLInputElement;
-          itemNameInput.value = '贈品';
+          itemNameInput.value = '伴手禮';
           itemNameInput.dispatchEvent(new Event('input'));
+
           const itemCatSelect = container.querySelector('#expense-category') as HTMLSelectElement;
           if (itemCatSelect && itemCatSelect.options.length > 0) {
             itemCatSelect.value = itemCatSelect.options[0].value;
             itemCatSelect.dispatchEvent(new Event('change'));
           }
+
+          const itemPriceInput = container.querySelector('#expense-amount') as HTMLInputElement;
+          itemPriceInput.value = '120';
+          itemPriceInput.dispatchEvent(new Event('input'));
           await flushAsync();
 
-          foreignAmountInput!.value = '100';
-          foreignAmountInput!.dispatchEvent(new Event('input'));
-          await flushAsync();
+          expect(foreignAmountInput!.value).toBe('120');
 
-          expect(foreignAmountInput!.value).toBe('100');
-
-          // 3. 模擬觸發 Watcher 監聽的相依來源變動（新增折扣後移除，使 discountsTotal 經歷變動回到 0）
+          // 3. 新增折扣 20，驗證外幣金額自動同步為 120 - 20 = 100
           const addDiscountBtn = Array.from(container.querySelectorAll('button')).find((b) =>
             b.textContent?.includes('新增折扣')
           ) as HTMLButtonElement;
@@ -1426,29 +1451,30 @@ describe('Milestone 5: TransactionForm 模組化拆分與歷史選單單元測�
           addDiscountBtn.click();
           await flushAsync();
 
-          const discAmountInput = container.querySelector('input[placeholder="折抵金額"]') as HTMLInputElement;
-          if (discAmountInput) {
-            discAmountInput.value = '10';
-            discAmountInput.dispatchEvent(new Event('input'));
-            await flushAsync();
-          }
+          const discNameInput = container.querySelector('#disc-name-0') as HTMLInputElement;
+          expect(discNameInput, '應存在折扣名稱輸入框').not.toBeNull();
+          discNameInput.value = '會員折扣';
+          discNameInput.dispatchEvent(new Event('input'));
 
-          const removeDiscBtn = container.querySelector('button[aria-label="刪除此折扣"]') as HTMLButtonElement;
-          expect(removeDiscBtn, '應存在折扣刪除按鈕').toBeDefined();
-          expect(removeDiscBtn.textContent?.trim()).toBe('刪除');
-          removeDiscBtn.click();
+          const discAmountInput = container.querySelector('input[placeholder="折抵金額"]') as HTMLInputElement;
+          expect(discAmountInput, '應存在折抵金額輸入框').not.toBeNull();
+          discAmountInput.value = '20';
+          discAmountInput.dispatchEvent(new Event('input'));
           await flushAsync();
 
-          // 4. 驗證在商品小計依然為 0 的情況下，使用者手填之外幣金額不得被 Watcher 清空或覆蓋為 0 或空字串
           expect(
             foreignAmountInput!.value,
-            '品項小計為 0 時，Watcher 不得清空或重設使用者手填之外幣金額'
+            '套用折扣 20 後，外幣金額應自動同步為 100'
           ).toBe('100');
 
-          // 5. 使用者填寫台幣扣款並儲存，驗證儲存之外幣總額確實保留手填之 100
+          // 4. 填寫台幣扣款與手續費並儲存，驗證儲存之外幣總額為自動同步之 100
           const netTwdInput = container.querySelector('#net-twd-amount') as HTMLInputElement;
           netTwdInput.value = '3200';
           netTwdInput.dispatchEvent(new Event('input'));
+
+          const feeInput = container.querySelector('#expense-fee-amount') as HTMLInputElement;
+          feeInput.value = '0';
+          feeInput.dispatchEvent(new Event('input'));
           await flushAsync();
 
           const submitBtn = (container.querySelector('#btn-submit-expense') ||
@@ -1463,7 +1489,7 @@ describe('Milestone 5: TransactionForm 模組化拆分與歷史選單單元測�
           expect(savedRecord.isForeign).toBe(true);
           expect(
             savedRecord.foreignAmount,
-            '儲存記錄中外幣金額必須為使用者手填之 100'
+            '儲存記錄中外幣金額必須為商品明細扣除折扣後自動同步之 100'
           ).toBe(100);
         } finally {
           cleanup();
@@ -1519,7 +1545,11 @@ describe('Milestone 5: TransactionForm 模組化拆分與歷史選單單元測�
         const accountInput = container.querySelector('#income-account');
         expect(accountInput, '依據 v2.0 規格，IncomeForm 畫面中不得存在 #income-account 存入帳戶輸入欄位').toBeNull();
 
-        // 2. 填寫入帳金額 88000
+        // 2. 選擇收入來源與填寫入帳金額 88000
+        const sourceSelect = container.querySelector('#income-source-select') as HTMLSelectElement;
+        sourceSelect.value = '公司薪資';
+        sourceSelect.dispatchEvent(new Event('change'));
+
         const amountInput = container.querySelector('#income-amount') as HTMLInputElement | null;
         expect(amountInput, '應存在 #income-amount 入帳金額輸入欄位').not.toBeNull();
         amountInput!.value = '88000';
@@ -1711,6 +1741,7 @@ describe('Milestone 5: TransactionForm 模組化拆分與歷史選單單元測�
 
   describe('折扣分類設定測試 (ExpenseForm)', () => {
     it('點擊 + 新增折扣 後應顯示折扣分類選單 (#disc-cat-0)，預設非「其他」且儲存時應帶入所選分類', async () => {
+      vi.mocked(dbModule.getPaymentMethods).mockResolvedValue(['現金']);
       vi.mocked(dbModule.getCategories).mockResolvedValueOnce([
         { id: 1, name: '餐飲', type: 'expense', isDefault: true, sortOrder: 1 },
         { id: 2, name: '日用品', type: 'expense', isDefault: false, sortOrder: 2 },
@@ -1720,7 +1751,11 @@ describe('Milestone 5: TransactionForm 模組化拆分與歷史選單單元測�
       await flushAsync();
 
       try {
-        // 先填寫第一項商品與分類
+        // 先填寫店家、第一項商品與分類
+        const merchantInput = container.querySelector('#merchant-input') as HTMLInputElement;
+        merchantInput.value = '大賣場';
+        merchantInput.dispatchEvent(new Event('input'));
+
         const nameInput = container.querySelector('#expense-name') as HTMLInputElement;
         const priceInput = container.querySelector('#expense-amount') as HTMLInputElement;
         const catSelect = container.querySelector('#expense-category') as HTMLSelectElement;
@@ -2000,7 +2035,7 @@ describe('Milestone 5: TransactionForm 模組化拆分與歷史選單單元測�
       }
     });
 
-    it('編輯舊記錄時若舊折扣分類不在商品分類內，仍保留於該筆折扣下拉選單供修改', async () => {
+    it('編輯舊記錄時若舊折扣分類不在商品分類內，不保留舊折扣分類（與設定表不對齊時清空）', async () => {
       const mockEditData = {
         id: 88,
         date: '2026-11-10',
@@ -2037,21 +2072,17 @@ describe('Milestone 5: TransactionForm 模組化拆分與歷史選單單元測�
 
       try {
         const discCat0 = container.querySelector('#disc-cat-0') as HTMLSelectElement | null;
-        expect(discCat0, '應保留舊折扣項目及其分類選單').not.toBeNull();
+        expect(discCat0, '應渲染折扣項目分類選單').not.toBeNull();
         const optionValues = Array.from(discCat0!.options).map((o) => o.value);
-        expect(optionValues).toEqual(['餐飲', '其他']);
-        expect(discCat0!.value).toBe('其他');
+        expect(optionValues).toEqual(['餐飲']);
+        expect(discCat0!.value).toBe('');
 
-        // 新增另一筆折扣時，新折扣只能選商品有的分類（不含舊折扣的「其他」）
-        const addDiscountBtn = Array.from(container.querySelectorAll('button')).find((b) =>
-          b.textContent?.includes('新增折扣')
-        ) as HTMLButtonElement;
-        addDiscountBtn.click();
+        // 未重選有效折扣分類直接按儲存，應阻擋儲存
+        const submitBtn = container.querySelector('#btn-submit-expense') as HTMLButtonElement;
+        submitBtn.click();
         await flushAsync();
-
-        const discCat1 = container.querySelector('#disc-cat-1') as HTMLSelectElement | null;
-        expect(discCat1).not.toBeNull();
-        expect(Array.from(discCat1!.options).map((o) => o.value)).toEqual(['餐飲']);
+        expect(dbModule.updateExpense).not.toHaveBeenCalled();
+        expect(container.querySelector('#expense-error-message')?.textContent).toContain('折扣分類');
       } finally {
         cleanup();
       }
@@ -2138,6 +2169,153 @@ describe('Milestone 5: TransactionForm 模組化拆分與歷史選單單元測�
         (itemDeleteBtns[1] as HTMLButtonElement).click();
         await flushAsync();
         expect(container.querySelectorAll('button[aria-label="刪除此商品"]').length).toBe(1);
+      } finally {
+        cleanup();
+      }
+    });
+  });
+
+  describe('嚴格必填驗證與編輯不對齊阻擋測試', () => {
+    it('支出表單：日期清空、店家未填或商品數量/單價留空時皆應阻擋儲存並標紅提示', async () => {
+      const { container, cleanup } = mountComponent(ExpenseForm);
+      await flushAsync();
+
+      try {
+        const dateInput = container.querySelector('#expense-date') as HTMLInputElement;
+        const merchantInput = container.querySelector('#merchant-input') as HTMLInputElement;
+        const submitBtn = container.querySelector('#btn-submit-expense') as HTMLButtonElement;
+
+        // 1. 清空日期
+        dateInput.value = '';
+        dateInput.dispatchEvent(new Event('input'));
+        await flushAsync();
+        submitBtn.click();
+        await flushAsync();
+        expect(dbModule.addExpense).not.toHaveBeenCalled();
+        expect(container.querySelector('#expense-error-message')?.textContent).toContain('消費日期');
+        expect(dateInput.className).toContain('border-rose-500');
+
+        // 2. 補回日期但不填店家
+        dateInput.value = '2026-11-15';
+        dateInput.dispatchEvent(new Event('input'));
+        await flushAsync();
+        submitBtn.click();
+        await flushAsync();
+        expect(dbModule.addExpense).not.toHaveBeenCalled();
+        expect(container.querySelector('#expense-error-message')?.textContent).toContain('店家名稱');
+        expect(merchantInput.className).toContain('border-rose-500');
+      } finally {
+        cleanup();
+      }
+    });
+
+    it('收入表單：國內金額必須大於 0，海外台幣到帳金額與手續費允許為 0 但不可留空', async () => {
+      const { container, cleanup } = mountComponent(IncomeForm);
+      await flushAsync();
+
+      try {
+        const sourceSelect = container.querySelector('#income-source-select') as HTMLSelectElement;
+        sourceSelect.value = '公司薪資';
+        sourceSelect.dispatchEvent(new Event('change'));
+        const amountInput = container.querySelector('#income-amount') as HTMLInputElement;
+        const submitBtn = container.querySelector('#btn-submit-income') as HTMLButtonElement;
+
+        // 國內金額填 0 應阻擋
+        amountInput.value = '0';
+        amountInput.dispatchEvent(new Event('input'));
+        await flushAsync();
+        submitBtn.click();
+        await flushAsync();
+        expect(dbModule.addIncome).not.toHaveBeenCalled();
+        expect(container.querySelector('#income-error-message')?.textContent).toContain('大於 0');
+
+        // 切換海外模式：外幣 > 0，台幣到帳金額 0，手續費 0 應可儲存
+        const foreignBtn = Array.from(container.querySelectorAll('button')).find((b) =>
+          b.textContent?.trim() === '海外'
+        ) as HTMLButtonElement;
+        foreignBtn.click();
+        await flushAsync();
+
+        const foreignAmount = container.querySelector('#foreign-income-amount') as HTMLInputElement;
+        const foreignTwd = container.querySelector('#income-amount') as HTMLInputElement;
+        const feeInput = container.querySelector('#income-fee-amount') as HTMLInputElement;
+
+        foreignAmount.value = '500';
+        foreignAmount.dispatchEvent(new Event('input'));
+        foreignTwd.value = '0';
+        foreignTwd.dispatchEvent(new Event('input'));
+        feeInput.value = '0';
+        feeInput.dispatchEvent(new Event('input'));
+        await flushAsync();
+
+        submitBtn.click();
+        await flushAsync();
+        expect(dbModule.addIncome).toHaveBeenCalledTimes(1);
+      } finally {
+        cleanup();
+      }
+    });
+
+    it('回饋表單：月份清空時應阻擋儲存並標紅月份欄位', async () => {
+      const { container, cleanup } = mountComponent(RewardForm);
+      await flushAsync();
+
+      try {
+        const monthInput = container.querySelector('#reward-month') as HTMLInputElement;
+        monthInput.value = '';
+        monthInput.dispatchEvent(new Event('input'));
+        await flushAsync();
+
+        const submitBtn = container.querySelector('#btn-submit-reward') as HTMLButtonElement;
+        submitBtn.click();
+        await flushAsync();
+
+        expect(dbModule.addReward).not.toHaveBeenCalled();
+        expect(container.textContent).toContain('請選擇回饋月份');
+        expect(monthInput.className).toContain('border-rose-500');
+      } finally {
+        cleanup();
+      }
+    });
+
+    it('編輯舊記錄時若商品分類或支付方式已不在設定清單內，應留空並於儲存時阻擋', async () => {
+      const staleExpense = {
+        id: 77,
+        date: '2026-11-10',
+        merchant: '舊商家',
+        paymentMethod: '已刪除卡片',
+        totalAmount: 100,
+        isForeign: false,
+        items: [
+          {
+            id: 'item-1',
+            type: 'item' as const,
+            name: '舊商品',
+            quantity: 1,
+            unitPrice: 100,
+            subtotal: 100,
+            category: '已刪除分類',
+          },
+        ],
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
+      };
+
+      const { container, cleanup } = mountComponent(ExpenseForm, { editData: staleExpense });
+      await flushAsync();
+
+      try {
+        const catSelect = container.querySelector('#expense-category') as HTMLSelectElement;
+        const paySelect = container.querySelector('#payment-method') as HTMLSelectElement;
+        expect(catSelect.value).toBe('');
+        expect(paySelect.value).toBe('');
+
+        const submitBtn = container.querySelector('#btn-submit-expense') as HTMLButtonElement;
+        submitBtn.click();
+        await flushAsync();
+
+        expect(dbModule.updateExpense).not.toHaveBeenCalled();
+        expect(container.querySelector('#expense-error-message')?.textContent).toContain('商品分類');
       } finally {
         cleanup();
       }

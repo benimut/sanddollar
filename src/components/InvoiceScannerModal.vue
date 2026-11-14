@@ -133,11 +133,12 @@ function handleParse() {
   try {
     const result = parseInvoiceQRCode(leftCode.value.trim(), rightCode.value.trim() || undefined);
 
-    // 確保每筆品項皆具備合理的預設分類（預設為「餐飲」）
+    // 確保每筆品項優先帶入支出分類清單第一項（若無可用分類則留空要求選擇）
+    const defaultCategory = categoryOptions.value[0] || '';
     if (result.items && result.items.length > 0) {
       for (const item of result.items) {
-        if (!item.category || item.category === '未分類') {
-          item.category = '餐飲';
+        if (!item.category || item.category === '未分類' || !categoryOptions.value.includes(item.category)) {
+          item.category = defaultCategory;
         }
       }
     }
@@ -161,11 +162,21 @@ async function handleClose() {
  * 確認並套用解析結果至表記帳表單
  */
 async function handleApply() {
-  if (parsedResult.value) {
-    emit('parsed', parsedResult.value);
-    await stopScanner();
-    emit('close');
+  if (!parsedResult.value) return;
+
+  if (parsedResult.value.items && parsedResult.value.items.length > 0) {
+    const hasInvalidCategory = parsedResult.value.items.some(
+      (it) => !it.category || !categoryOptions.value.includes(it.category)
+    );
+    if (hasInvalidCategory) {
+      errorMessage.value = '請為所有商品明細選擇有效的支出分類';
+      return;
+    }
   }
+
+  emit('parsed', parsedResult.value);
+  await stopScanner();
+  emit('close');
 }
 
 onMounted(async () => {
