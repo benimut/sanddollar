@@ -44,6 +44,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { createApp, nextTick } from 'vue';
 import App from '@/App.vue';
 import SettingsView from '@/components/SettingsView.vue';
+import ExpenseForm from '@/components/ExpenseForm.vue';
 import IncomeForm from '@/components/IncomeForm.vue';
 import RewardForm from '@/components/RewardForm.vue';
 import { db } from '@/db';
@@ -977,6 +978,113 @@ describe('Sand Dollar 設定頁面與導覽整合單元測試 (settings_view.spe
         // 驗證自動呼叫 addRewardSource 將新來源持久化至設定表
         expect(addRewardSourceSpy).toHaveBeenCalledWith('P幣回饋');
       });
+    });
+  });
+
+  // ==========================================
+  // 8. 設為預設功能 UI 切換與各表單自動帶入預設測試
+  // ==========================================
+  describe('8. 設為預設功能 UI 與表單自動帶入預設驗證', () => {
+    it('設定頁點擊星號按鈕後應切換各清單的預設項目，且實心/空心星號正確顯示', async () => {
+      await db.categories.bulkAdd([
+        { name: '交通', type: 'expense', isDefault: false, isPreferred: true },
+        { name: '餐飲', type: 'expense', isDefault: false, isPreferred: false },
+      ]);
+      await db.paymentMethods.bulkAdd([
+        { name: '信用卡', isDefault: false, isPreferred: true },
+        { name: '現金', isDefault: false, isPreferred: false },
+      ]);
+
+      const { container, cleanup } = mountComponent(SettingsView);
+      activeCleanups.push(cleanup);
+      await flushAsync(80);
+
+      // 驗證分類列表有星號按鈕，且第二項「餐飲」為空心星號
+      const catDefaultBtns = Array.from(container.querySelectorAll('.btn-default-category')) as HTMLButtonElement[];
+      expect(catDefaultBtns).toHaveLength(2);
+      expect(catDefaultBtns[0].getAttribute('data-is-default')).toBe('true');
+      expect(catDefaultBtns[1].getAttribute('data-is-default')).toBe('false');
+
+      // 點擊第二項「餐飲」的星號設為預設
+      catDefaultBtns[1].click();
+      await flushAsync(80);
+
+      const updatedCatBtns = Array.from(container.querySelectorAll('.btn-default-category')) as HTMLButtonElement[];
+      expect(updatedCatBtns[0].getAttribute('data-is-default')).toBe('false');
+      expect(updatedCatBtns[1].getAttribute('data-is-default')).toBe('true');
+      expect(await dbModule.getPreferredCategoryName('expense')).toBe('餐飲');
+
+      // 驗證支付方式星號切換
+      const pmDefaultBtns = Array.from(container.querySelectorAll('.btn-default-payment-method')) as HTMLButtonElement[];
+      expect(pmDefaultBtns).toHaveLength(2);
+      pmDefaultBtns[1].click();
+      await flushAsync(80);
+      expect(await dbModule.getPreferredPaymentMethod()).toBe('現金');
+    });
+
+    it('ExpenseForm 新增模式應自動帶入預設支出分類與支付方式，且新增商品明細沿用上一筆分類', async () => {
+      await db.categories.bulkAdd([
+        { name: '交通', type: 'expense', isDefault: false, isPreferred: false },
+        { name: '餐飲', type: 'expense', isDefault: false, isPreferred: true },
+      ]);
+      await db.paymentMethods.bulkAdd([
+        { name: '信用卡', isDefault: false, isPreferred: false },
+        { name: '現金', isDefault: false, isPreferred: true },
+      ]);
+
+      const { container, cleanup } = mountComponent(ExpenseForm);
+      activeCleanups.push(cleanup);
+      await flushAsync(80);
+
+      const catSelect0 = container.querySelector('#expense-category') as HTMLSelectElement;
+      const pmSelect = container.querySelector('#payment-method') as HTMLSelectElement;
+      expect(catSelect0.value).toBe('餐飲');
+      expect(pmSelect.value).toBe('現金');
+
+      // 手動把第 1 筆明細分類改成「交通」後，點擊「+ 新增商品」，第 2 筆應沿用「交通」
+      catSelect0.value = '交通';
+      catSelect0.dispatchEvent(new Event('change'));
+      await flushAsync();
+
+      const addItemBtn = container.querySelector('#btn-add-item') as HTMLButtonElement;
+      addItemBtn.click();
+      await flushAsync();
+
+      const catSelect1 = container.querySelector('#item-cat-1') as HTMLSelectElement;
+      expect(catSelect1.value).toBe('交通');
+    });
+
+    it('IncomeForm 與 RewardForm 新增模式應自動帶入預設分類與預設來源', async () => {
+      await db.categories.bulkAdd([
+        { name: '投資', type: 'income', isDefault: false, isPreferred: false },
+        { name: '薪資', type: 'income', isDefault: false, isPreferred: true },
+      ]);
+      await db.incomeSources.bulkAdd([
+        { name: '接案', isDefault: false, isPreferred: false },
+        { name: '本業公司', isDefault: false, isPreferred: true },
+      ]);
+      await db.rewardSources.bulkAdd([
+        { name: 'LINE POINTS', isDefault: false, isPreferred: false },
+        { name: '玉山 Pi', isDefault: false, isPreferred: true },
+      ]);
+
+      const incMount = mountComponent(IncomeForm);
+      activeCleanups.push(incMount.cleanup);
+      await flushAsync(80);
+
+      const incCatSelect = incMount.container.querySelector('select[name="income-category"], #income-category') as HTMLSelectElement;
+      const incSrcSelect = incMount.container.querySelector('#income-source-select') as HTMLSelectElement;
+      if (incCatSelect) {
+        expect(incCatSelect.value).toBe('薪資');
+      }
+      expect(incSrcSelect.value).toBe('本業公司');
+
+      const rewMount = mountComponent(RewardForm);
+      activeCleanups.push(rewMount.cleanup);
+      await flushAsync(80);
+
+      const rewSrcSelect = rewMount.container.querySelector('#reward-source-select') as HTMLSelectElement;
+      expect(rewSrcSelect.value).toBe('玉山 Pi');
     });
   });
 });

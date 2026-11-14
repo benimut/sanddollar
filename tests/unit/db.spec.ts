@@ -50,15 +50,15 @@ describe('Dexie.js 本地資料庫模型與儲存操作 (TrackerDatabase & db se
       expect((db as any).categories).toBeDefined();
     });
 
-    it('全域單例 db 之名稱應為 MobileExpenseTrackerDB 且版本為 4', () => {
+    it('全域單例 db 之名稱應為 MobileExpenseTrackerDB 且版本為 5', () => {
       expect(db.name).toBe('MobileExpenseTrackerDB');
-      expect(db.verno).toBe(4);
+      expect(db.verno).toBe(5);
     });
 
-    it('TrackerDatabase 建構子應支援自訂 dbName 並維持版本 4', () => {
+    it('TrackerDatabase 建構子應支援自訂 dbName 並維持版本 5', () => {
       const customDb = new TrackerDatabase('CustomIsolatedDB');
       expect(customDb.name).toBe('CustomIsolatedDB');
-      expect(customDb.verno).toBe(4);
+      expect(customDb.verno).toBe(5);
       customDb.close();
     });
 
