@@ -20,6 +20,7 @@ import {
   getItemsByMerchant,
   cacheMerchantItems,
   getPaymentMethods,
+  getPreferredPaymentMethod,
   addPaymentMethod,
   getDistinctMerchants,
   DEFAULT_PAYMENT_METHODS,
@@ -68,6 +69,7 @@ const categoryTargetItemIndex = ref<number | null>(null);
 // 使用共用 Composable 管理支出分類
 const {
   categories: expenseCategoryList,
+  defaultCategory: defaultExpenseCategory,
   showAddCategory,
   newCategoryName,
   categoryError,
@@ -84,6 +86,8 @@ const {
 
 /** 可用支付方式清單（純淨模式預設為空陣列，從資料庫載入自訂項目） */
 const paymentMethodList = ref<string[]>([...DEFAULT_PAYMENT_METHODS]);
+/** 使用者設定的預設支付方式 */
+const defaultPaymentMethod = ref<string>(DEFAULT_PAYMENT_METHODS[0] || '');
 
 /**
  * 支付方式選單動態選項介面
@@ -490,9 +494,16 @@ const totalExpenseAmount = computed(() => {
  */
 async function loadPaymentMethodsList() {
   try {
-    const list = await getPaymentMethods();
+    const [list, preferred] = await Promise.all([
+      getPaymentMethods(),
+      getPreferredPaymentMethod(),
+    ]);
     const merged = new Set<string>([...DEFAULT_PAYMENT_METHODS, ...(Array.isArray(list) ? list : [])]);
     paymentMethodList.value = sortStringsNaturally(Array.from(merged));
+    defaultPaymentMethod.value =
+      preferred && paymentMethodList.value.includes(preferred)
+        ? preferred
+        : paymentMethodList.value[0] || '';
     if (paymentMethodList.value.length === 0) {
       if (!isEditMode.value) {
         paymentMethod.value = '__add_new__';
@@ -502,12 +513,13 @@ async function loadPaymentMethodsList() {
       }
     } else if (!isEditMode.value) {
       if (!paymentMethod.value || !paymentMethodList.value.includes(paymentMethod.value)) {
-        paymentMethod.value = paymentMethodList.value[0];
+        paymentMethod.value = defaultPaymentMethod.value || paymentMethodList.value[0];
         isAddingPayment.value = false;
       }
     }
   } catch {
     paymentMethodList.value = [...DEFAULT_PAYMENT_METHODS];
+    defaultPaymentMethod.value = paymentMethodList.value[0] || '';
     if (paymentMethodList.value.length === 0) {
       if (!isEditMode.value) {
         paymentMethod.value = '__add_new__';
@@ -517,7 +529,7 @@ async function loadPaymentMethodsList() {
       }
     } else if (!isEditMode.value) {
       if (!paymentMethod.value || !paymentMethodList.value.includes(paymentMethod.value)) {
-        paymentMethod.value = paymentMethodList.value[0];
+        paymentMethod.value = defaultPaymentMethod.value || paymentMethodList.value[0];
         isAddingPayment.value = false;
       }
     }
@@ -547,7 +559,7 @@ onMounted(async () => {
   if (isEditMode.value) {
     reconcileEditSelections();
   } else if (expenseCategoryList.value.length > 0 && items.value.length > 0 && !items.value[0].category) {
-    items.value[0].category = expenseCategoryList.value[0];
+    items.value[0].category = defaultExpenseCategory.value || expenseCategoryList.value[0];
   }
   await nextTick();
   if (paymentSelectRef.value && paymentMethod.value) {
@@ -613,15 +625,20 @@ function handlePaymentChange(e: Event) {
 }
 
 /**
- * 新增一列空白購買商品
+ * 新增一列空白購買商品（沿用上一筆商品明細已選分類，若無則帶入預設分類）
  */
 function addItem() {
+  const prevCat = items.value[items.value.length - 1]?.category?.trim();
+  const inheritedCategory =
+    prevCat && prevCat !== '__add_new__'
+      ? prevCat
+      : defaultExpenseCategory.value || expenseCategoryList.value[0] || '';
   items.value.push({
     id: `item-${Date.now()}`,
     name: '',
     quantity: 1,
     unitPrice: 0,
-    category: expenseCategoryList.value[0] || '',
+    category: inheritedCategory,
   });
 }
 
@@ -638,7 +655,7 @@ function removeItem(index: number) {
       name: '',
       quantity: 1,
       unitPrice: 0,
-      category: expenseCategoryList.value[0] || '',
+      category: defaultExpenseCategory.value || expenseCategoryList.value[0] || '',
     };
   }
 }
@@ -733,7 +750,7 @@ function resetForm() {
       name: '',
       quantity: 1,
       unitPrice: 0,
-      category: expenseCategoryList.value[0] || '',
+      category: defaultExpenseCategory.value || expenseCategoryList.value[0] || '',
     },
   ];
   discounts.value = [];
@@ -752,7 +769,7 @@ function resetForm() {
     paymentMethod.value = '__add_new__';
     isAddingPayment.value = true;
   } else {
-    paymentMethod.value = paymentMethodList.value[0];
+    paymentMethod.value = defaultPaymentMethod.value || paymentMethodList.value[0];
     isAddingPayment.value = false;
   }
 }

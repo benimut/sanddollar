@@ -144,6 +144,8 @@ export interface CategoryRecord {
   type: 'expense' | 'income';
   /** 是否為系統內建之預設種子分類 (預設分類通常具有保護或預先植入屬性) */
   isDefault: boolean;
+  /** 是否為使用者設定的選單預設項目 */
+  isPreferred?: boolean;
 }
 
 /**
@@ -161,6 +163,8 @@ export interface PaymentMethodRecord {
   name: string;
   /** 是否為系統內建預設支付方式 */
   isDefault?: boolean;
+  /** 是否為使用者設定的選單預設項目 */
+  isPreferred?: boolean;
 }
 
 /**
@@ -182,6 +186,8 @@ export interface IncomeSourceRecord {
   name: string;
   /** 是否為系統內建預設收入來源 */
   isDefault?: boolean;
+  /** 是否為使用者設定的選單預設項目 */
+  isPreferred?: boolean;
 }
 
 /**
@@ -194,6 +200,8 @@ export interface RewardSourceRecord {
   name: string;
   /** 是否為系統內建預設回饋來源 */
   isDefault?: boolean;
+  /** 是否為使用者設定的選單預設項目 */
+  isPreferred?: boolean;
 }
 
 /**

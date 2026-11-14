@@ -15,6 +15,7 @@ import { sortByNameNaturally } from '@/utils/sort';
 interface ItemRecord {
   id?: number;
   name: string;
+  isPreferred?: boolean;
 }
 
 interface Props {
@@ -42,10 +43,18 @@ const emit = defineEmits<{
   (e: 'add', name: string): void;
   (e: 'update', payload: { id: number; name: string }): void;
   (e: 'delete', id: number): void;
+  (e: 'set-default', id: number): void;
 }>();
 
 /** 依名稱自然文字排序後之項目清單 */
 const sortedItems = computed(() => sortByNameNaturally(props.items));
+
+/** 目前生效的預設項目 ID（若無明確標記則以排序第一項為準） */
+const effectiveDefaultId = computed<number | undefined>(() => {
+  const preferred = sortedItems.value.find((item) => item.isPreferred === true);
+  if (preferred?.id !== undefined) return preferred.id;
+  return sortedItems.value[0]?.id;
+});
 
 /** 新增項目輸入框內容 */
 const newItemName = ref('');
@@ -105,6 +114,16 @@ function handleDelete(id: number) {
   if (editingId.value === id) {
     editingId.value = null;
   }
+}
+
+/**
+ * 處理設為預設項目
+ *
+ * @param id - 項目 ID
+ */
+function handleSetDefault(id: number) {
+  if (effectiveDefaultId.value === id) return;
+  emit('set-default', id);
 }
 </script>
 
@@ -175,7 +194,25 @@ function handleDelete(id: number) {
 
         <!-- 正常瀏覽狀態 -->
         <template v-else>
-          <span class="font-medium text-slate-700">{{ item.name }}</span>
+          <div class="flex items-center gap-1.5">
+            <button
+              type="button"
+              :class="[
+                `btn-default-${idPrefix}`,
+                effectiveDefaultId === item.id
+                  ? 'text-amber-500 bg-amber-50/70'
+                  : 'text-slate-300 hover:text-amber-500 hover:bg-amber-50',
+              ]"
+              class="px-1.5 py-1 rounded-lg transition-colors text-sm leading-none"
+              :title="effectiveDefaultId === item.id ? '目前預設' : '設為預設'"
+              :aria-label="effectiveDefaultId === item.id ? '目前預設' : '設為預設'"
+              :data-is-default="effectiveDefaultId === item.id ? 'true' : 'false'"
+              @click="handleSetDefault(item.id!)"
+            >
+              {{ effectiveDefaultId === item.id ? '★' : '☆' }}
+            </button>
+            <span class="font-medium text-slate-700">{{ item.name }}</span>
+          </div>
           <div class="flex items-center gap-1">
             <button
               type="button"
