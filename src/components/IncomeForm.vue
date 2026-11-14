@@ -83,6 +83,33 @@ const foreignIncomeAmount = ref<number | ''>('');
 const incomeFeeCurrency = ref('TWD');
 const incomeFeeAmount = ref<number | ''>('');
 
+// 表單驗證錯誤狀態
+const errorMessage = ref('');
+const errorField = ref('');
+
+function setValidationError(field: string, message: string): false {
+  errorField.value = field;
+  errorMessage.value = message;
+  return false;
+}
+
+function clearValidationError() {
+  errorField.value = '';
+  errorMessage.value = '';
+}
+
+function isBlankOrInvalidNumber(val: unknown): boolean {
+  if (val === '' || val === null || val === undefined || typeof val === 'boolean') {
+    return true;
+  }
+  const num = Number(val);
+  return Number.isNaN(num) || !Number.isFinite(num);
+}
+
+function errorBorderClass(field: string): string {
+  return errorField.value === field ? 'border-rose-500 ring-2 ring-rose-200' : '';
+}
+
 // ==================== 計算屬性 ====================
 
 /**
@@ -140,15 +167,42 @@ const foreignIncomeCalc = computed(() => {
   };
 });
 
+const isListsLoaded = ref(false);
+
+/**
+ * 編輯模式下比對設定清單，若分類或收入來源已不存在於目前設定清單中則留空
+ */
+function reconcileEditSelections() {
+  if (!isEditMode.value || !isListsLoaded.value) return;
+
+  if (
+    incomeCategory.value &&
+    incomeCategory.value !== '__add_new__' &&
+    !incomeCategoryList.value.includes(incomeCategory.value)
+  ) {
+    incomeCategory.value = '';
+  }
+
+  if (
+    selectedSourceOption.value &&
+    selectedSourceOption.value !== '__add_new__' &&
+    !distinctSources.value.includes(selectedSourceOption.value)
+  ) {
+    selectedSourceOption.value = '';
+    incomeSource.value = '';
+  }
+}
+
 // 監聽 props.editData 進入編輯模式時完整帶入資料
 watch(
   () => props.editData,
   (data) => {
+    clearValidationError();
     if (data) {
-      incomeDate.value = data.date || getTodayDateString();
+      incomeDate.value = data.date || '';
       incomeSource.value = data.source || '';
       selectedSourceOption.value = data.source || '';
-      incomeCategory.value = data.category || '其他';
+      incomeCategory.value = data.category || '';
       incomeAmount.value = data.amount ?? '';
       incomeNote.value = data.note || '';
       isForeignIncome.value = !!data.isForeign;
@@ -156,6 +210,7 @@ watch(
       foreignIncomeAmount.value = data.foreignAmount ?? '';
       incomeFeeCurrency.value = 'TWD';
       incomeFeeAmount.value = data.fee ?? '';
+      reconcileEditSelections();
     }
   },
   { immediate: true }
@@ -168,7 +223,10 @@ onMounted(async () => {
     loadDistinctSources(),
     loadCategories(),
   ]);
-  if (incomeCategoryList.value.length > 0 && !incomeCategory.value) {
+  isListsLoaded.value = true;
+  if (isEditMode.value) {
+    reconcileEditSelections();
+  } else if (incomeCategoryList.value.length > 0 && !incomeCategory.value) {
     incomeCategory.value = incomeCategoryList.value[0];
   }
 });
@@ -232,6 +290,7 @@ function handleCategoryChange(e: Event) {
  * 重設表單狀態為初始空白
  */
 function resetForm() {
+  clearValidationError();
   incomeDate.value = getTodayDateString();
   incomeSource.value = '';
   customSourceName.value = '';
@@ -256,45 +315,86 @@ function handleCancelEdit() {
 }
 
 /**
+ * 驗證收入表單所有必填與數值邊界規則
+ */
+function validateIncomeForm(): boolean {
+  clearValidationError();
+
+  if (!incomeDate.value || !incomeDate.value.trim()) {
+    return setValidationError('date', '請選擇入帳日期');
+  }
+
+  const rawCat = incomeCategory.value?.trim() || '';
+  if (showAddCategory.value || rawCat === '__add_new__') {
+    if (!newCategoryName.value.trim()) {
+      return setValidationError('custom-category', '請輸入新收入分類名稱');
+    }
+  } else if (!rawCat || !incomeCategoryList.value.includes(rawCat)) {
+    return setValidationError('category', '請選擇收入分類');
+  }
+
+  const isAddingState = isAddingSource.value || selectedSourceOption.value === '__add_new__';
+  if (isAddingState) {
+    if (!customSourceName.value.trim()) {
+      return setValidationError('custom-source', '請輸入新收入來源名稱');
+    }
+  } else {
+    const rawSrc = selectedSourceOption.value?.trim() || incomeSource.value?.trim() || '';
+    if (!rawSrc || !distinctSources.value.includes(rawSrc)) {
+      return setValidationError('source', '請選擇收入來源');
+    }
+  }
+
+  if (isForeignIncome.value) {
+    if (isBlankOrInvalidNumber(foreignIncomeAmount.value) || Number(foreignIncomeAmount.value) <= 0) {
+      return setValidationError('foreign-amount', '外幣金額必須大於 0');
+    }
+    if (isBlankOrInvalidNumber(incomeAmount.value) || Number(incomeAmount.value) < 0) {
+      return setValidationError('amount', '請輸入台幣到帳金額（可為 0，不可為負數）');
+    }
+    if (isBlankOrInvalidNumber(incomeFeeAmount.value) || Number(incomeFeeAmount.value) < 0) {
+      return setValidationError('fee', '請輸入手續費金額（可為 0，不可為負數）');
+    }
+  } else {
+    if (isBlankOrInvalidNumber(incomeAmount.value) || Number(incomeAmount.value) <= 0) {
+      return setValidationError('amount', '收入金額必須大於 0');
+    }
+  }
+
+  return true;
+}
+
+/**
  * 送出儲存收入表記錄
  */
 async function handleSaveIncome() {
-  // 處理自訂分類建立或未填 fallback「其他」
-  let finalCategory = incomeCategory.value?.trim() || '';
-  if (showAddCategory.value || !finalCategory || finalCategory === '__add_new__') {
-    const cleanCat = newCategoryName.value.trim();
-    if (cleanCat) {
-      await handleCreateCategory(cleanCat);
-      finalCategory = cleanCat;
-    } else {
-      finalCategory = '其他';
-    }
+  if (!validateIncomeForm()) {
+    return;
   }
 
-  // 處理自訂收入來源建立或未填 fallback「未分類收入」
+  // 處理自訂分類建立（無 fallback）
+  let finalCategory = incomeCategory.value.trim();
+  if (showAddCategory.value || !finalCategory || finalCategory === '__add_new__') {
+    const cleanCat = newCategoryName.value.trim();
+    await handleCreateCategory(cleanCat);
+    finalCategory = cleanCat;
+  }
+
+  // 處理收入來源（無 fallback）
   let finalSource = '';
   const isAddingState = isAddingSource.value || selectedSourceOption.value === '__add_new__';
   if (isAddingState) {
-    const cleanCustom = customSourceName.value.trim();
-    if (cleanCustom) {
-      finalSource = cleanCustom;
-      try {
-        await addIncomeSource(cleanCustom);
-      } catch {
-        // 忽略已存在或重複錯誤，確保記帳流程順暢
-      }
-    } else {
-      // 自訂名稱為空：安全 fallback 為「未分類收入」，絕對禁止寫入設定表
-      finalSource = '未分類收入';
+    finalSource = customSourceName.value.trim();
+    try {
+      await addIncomeSource(finalSource);
+    } catch {
+      // 忽略已存在或重複錯誤，確保記帳流程順暢
     }
   } else {
-    finalSource = selectedSourceOption.value?.trim() || incomeSource.value?.trim() || '';
-    if (!finalSource || finalSource === '__add_new__') {
-      finalSource = '未分類收入';
-    }
+    finalSource = selectedSourceOption.value?.trim() || incomeSource.value.trim();
   }
 
-  const finalAmount = Number(incomeAmount.value) || 0;
+  const finalAmount = Number(incomeAmount.value);
 
   const record: IncomeRecord = {
     date: incomeDate.value,
@@ -304,7 +404,7 @@ async function handleSaveIncome() {
     note: incomeNote.value.trim() || undefined,
     isForeign: isForeignIncome.value,
     currency: isForeignIncome.value ? foreignIncomeCurrency.value : undefined,
-    foreignAmount: isForeignIncome.value ? Number(foreignIncomeAmount.value) || 0 : undefined,
+    foreignAmount: isForeignIncome.value ? Number(foreignIncomeAmount.value) : undefined,
     fee: isForeignIncome.value ? calculatedTwdFee.value : 0,
     exchangeRate: isForeignIncome.value && effectiveExchangeRate.value > 0 ? effectiveExchangeRate.value : undefined,
     createdAt: Date.now(),
@@ -362,6 +462,7 @@ async function handleSaveIncome() {
           id="income-date"
           v-model="incomeDate"
           type="date"
+          :class="errorBorderClass('date')"
           class="w-full text-sm border border-slate-200 rounded-lg p-2 focus:ring-2 focus:ring-teal-500 focus:outline-none"
         />
       </div>
@@ -371,6 +472,7 @@ async function handleSaveIncome() {
           id="income-category"
           v-model="incomeCategory"
           name="category"
+          :class="errorBorderClass('category')"
           class="w-full text-sm border border-slate-200 rounded-lg p-2 focus:ring-2 focus:ring-teal-500 focus:outline-none"
           @change="handleCategoryChange"
         >
@@ -391,7 +493,8 @@ async function handleSaveIncome() {
           id="custom-income-category-input"
           v-model="newCategoryName"
           type="text"
-          placeholder="輸入新收入分類名稱 (未填將預設為其他)"
+          placeholder="輸入新收入分類名稱"
+          :class="errorBorderClass('custom-category')"
           class="flex-1 text-xs border border-slate-300 rounded-lg p-2 bg-white focus:ring-2 focus:ring-teal-500 focus:outline-none"
         />
         <button
@@ -421,6 +524,7 @@ async function handleSaveIncome() {
           id="income-source-select"
           v-model="selectedSourceOption"
           name="income-source-select"
+          :class="errorBorderClass('source')"
           class="w-full text-sm border border-slate-200 rounded-lg p-2 bg-white focus:ring-2 focus:ring-teal-500 focus:outline-none"
           @change="handleSourceSelectChange"
         >
@@ -435,7 +539,8 @@ async function handleSaveIncome() {
             id="custom-income-source-input"
             v-model="customSourceName"
             type="text"
-            placeholder="輸入新收入來源名稱 (未填將預設為未分類收入)"
+            placeholder="輸入新收入來源名稱"
+            :class="errorBorderClass('custom-source')"
             class="w-full text-xs border border-teal-300 rounded-lg p-2 bg-teal-50/50 focus:ring-2 focus:ring-teal-500 focus:outline-none"
             @input="handleCustomSourceInput"
           />
@@ -498,6 +603,7 @@ async function handleSaveIncome() {
             type="number"
             step="any"
             placeholder="外幣金額"
+            :class="errorBorderClass('foreign-amount')"
             class="w-full text-sm border border-slate-200 rounded-lg p-2 bg-white focus:ring-2 focus:ring-teal-500 focus:outline-none"
           />
         </div>
@@ -507,7 +613,9 @@ async function handleSaveIncome() {
             id="income-amount"
             v-model.number="incomeAmount"
             type="number"
+            min="0"
             placeholder="到帳金額"
+            :class="errorBorderClass('amount')"
             class="w-full text-sm border border-slate-200 rounded-lg p-2 bg-white focus:ring-2 focus:ring-teal-500 focus:outline-none"
           />
         </div>
@@ -539,6 +647,7 @@ async function handleSaveIncome() {
             step="any"
             min="0"
             placeholder="手續費金額"
+            :class="errorBorderClass('fee')"
             class="w-full text-sm border border-slate-200 rounded-lg p-2 bg-white focus:ring-2 focus:ring-teal-500 focus:outline-none"
           />
         </div>
@@ -565,6 +674,7 @@ async function handleSaveIncome() {
         v-model.number="incomeAmount"
         type="number"
         placeholder="到帳金額"
+        :class="errorBorderClass('amount')"
         class="w-full text-sm border border-slate-200 rounded-lg p-2 focus:ring-2 focus:ring-teal-500 focus:outline-none"
       />
     </div>
@@ -580,6 +690,11 @@ async function handleSaveIncome() {
         class="w-full text-sm border border-slate-200 rounded-lg p-2 focus:ring-2 focus:ring-teal-500 focus:outline-none"
       />
     </div>
+
+    <!-- 錯誤提示 -->
+    <p v-if="errorMessage" id="income-error-message" class="text-xs text-rose-600 font-medium text-right">
+      {{ errorMessage }}
+    </p>
 
     <!-- 儲存/取消收入按鈕 -->
     <div class="pt-4 border-t border-slate-100 flex items-center justify-between">

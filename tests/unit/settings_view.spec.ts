@@ -806,6 +806,7 @@ describe('Sand Dollar 設定頁面與導覽整合單元測試 (settings_view.spe
       });
 
       it('驗證當選取「+ 新增收入來源...」並送出儲存時，會自動呼叫 addIncomeSource 將新來源持久化至設定表', async () => {
+        await db.categories.add({ name: '薪資', type: 'income', isDefault: true });
         const addIncomeSourceSpy = vi.spyOn(dbModule, 'addIncomeSource');
 
         const { container, cleanup } = mountComponent(IncomeForm);
@@ -846,7 +847,8 @@ describe('Sand Dollar 設定頁面與導覽整合單元測試 (settings_view.spe
         expect(addIncomeSourceSpy).toHaveBeenCalledWith('獎金紅包');
       });
 
-      it('當使用者在 IncomeForm.vue 選取「+ 新增收入來源...」但未填寫自訂名稱直接送出儲存時，送出之收入記錄 source 安全 fallback 為「未分類收入」，且嚴格禁止呼叫 addIncomeSource 將「未分類收入」寫入 incomeSources 設定表', async () => {
+      it('當使用者在 IncomeForm.vue 選取「+ 新增收入來源...」但未填寫自訂名稱直接送出儲存時，應阻擋儲存並顯示錯誤提示，嚴禁呼叫 addIncome 或 addIncomeSource', async () => {
+        await db.categories.add({ name: '薪資', type: 'income', isDefault: true });
         const addIncomeSourceSpy = vi.spyOn(dbModule, 'addIncomeSource');
         const addIncomeSpy = vi.spyOn(dbModule, 'addIncome');
 
@@ -869,7 +871,7 @@ describe('Sand Dollar 設定頁面與導覽整合單元測試 (settings_view.spe
         customInput.dispatchEvent(new Event('input'));
         await flushAsync();
 
-        // 填入金額以通過必填校驗
+        // 填入金額
         const amountInput = container.querySelector('#income-amount') as HTMLInputElement;
         if (amountInput) {
           amountInput.value = '6600';
@@ -884,16 +886,10 @@ describe('Sand Dollar 設定頁面與導覽整合單元測試 (settings_view.spe
         submitBtn.click();
         await flushAsync(100);
 
-        // 驗證送出之收入記錄 source 安全 fallback 為「未分類收入」
-        expect(addIncomeSpy).toHaveBeenCalled();
-        const savedIncome = addIncomeSpy.mock.calls[0][0];
-        expect(savedIncome.source, '未填自訂收入名稱時，source 必須 fallback 為「未分類收入」').toBe('未分類收入');
-
-        // 驗證嚴格禁止呼叫 addIncomeSource 將「未分類收入」寫入 incomeSources 設定表
-        expect(
-          addIncomeSourceSpy,
-          '嚴格禁止呼叫 addIncomeSource 將「未分類收入」寫入 incomeSources 設定表'
-        ).not.toHaveBeenCalledWith('未分類收入');
+        // 驗證阻擋儲存並顯示錯誤訊息
+        expect(addIncomeSpy).not.toHaveBeenCalled();
+        expect(addIncomeSourceSpy).not.toHaveBeenCalled();
+        expect(container.querySelector('#income-error-message')?.textContent).toContain('請輸入新收入來源名稱');
       });
     });
 

@@ -63,6 +63,7 @@ describe('明細列表編輯聯動與完整編輯流程測試 (TransactionList &
       if (db.rewards) await db.rewards.clear();
       if (db.categories) await db.categories.clear();
       if (db.paymentMethods) await db.paymentMethods.clear();
+      if (db.incomeSources) await db.incomeSources.clear();
     }
   });
 
@@ -120,6 +121,14 @@ describe('明細列表編輯聯動與完整編輯流程測試 (TransactionList &
 
   describe('2. App.vue 頂層完整編輯聯動流程 (End-to-End Workflow)', () => {
     it('在明細點擊支出「編輯」後切換至「記帳」頁籤進入編輯模式，修改品項與金額儲存後自動返回明細頁籤', async () => {
+      // 預先建立對應的支出分類與支付方式設定
+      if (db.categories) {
+        await db.categories.add({ name: '餐飲', type: 'expense', isDefault: true });
+      }
+      if (db.paymentMethods) {
+        await db.paymentMethods.add({ name: '現金', isDefault: true });
+      }
+
       // 1. 建立初始支出記錄
       const initialExpense: ExpenseRecord = {
         date: '2026-11-10',
@@ -210,6 +219,14 @@ describe('明細列表編輯聯動與完整編輯流程測試 (TransactionList &
     });
 
     it('在明細點擊收入「編輯」後切換至「記帳」頁籤進入編輯模式，修改金額儲存後自動返回明細頁籤', async () => {
+      // 預先建立對應的收入分類與來源設定
+      if (db.categories) {
+        await db.categories.add({ name: '兼職', type: 'income', isDefault: true });
+      }
+      if (db.incomeSources) {
+        await db.incomeSources.add({ name: '舊公司外包', isDefault: false });
+      }
+
       const initialIncome: IncomeRecord = {
         date: '2026-11-05',
         source: '舊公司外包',

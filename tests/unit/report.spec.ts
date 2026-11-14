@@ -1027,15 +1027,37 @@ describe('ReportView.vue - 報表元件圖表動態渲染與假 SVG 排除驗證
     }
   });
 
-  it('載入收支資料後，renderBarChart 應正確呼叫 Chart.js 初始化 bar 類型與 0 軸堆疊長條圖實例', async () => {
+  it('載入收支資料後，預設帶入今年區間且點擊「全部」後應正確顯示歷史月份 2024-11 並初始化 0 軸堆疊長條圖', async () => {
     const { container, cleanup } = mountReportView();
     await flushAsyncWork();
 
     try {
-      // 驗證 Chart.js 實例中是否存在 type: 'bar' 的長條圖實例
-      const barChartInstance = mockChartInstances.find(
+      // 驗證預設起訖區間為今年 (YYYY-01 ~ YYYY-12)
+      const currentYear = new Date().getFullYear();
+      const startInput = container.querySelector('#report-start-month') as HTMLInputElement;
+      const endInput = container.querySelector('#report-end-month') as HTMLInputElement;
+      expect(startInput?.value).toBe(`${currentYear}-01`);
+      expect(endInput?.value).toBe(`${currentYear}-12`);
+
+      // 驗證預設今年長條圖列出今年 1~12 月且不會退回包含 2024-11
+      let barChartInstance = mockChartInstances.find(
         (inst) => inst.config?.type === 'bar'
       );
+      expect(barChartInstance).toBeDefined();
+      expect(barChartInstance.config.data.labels).toHaveLength(12);
+      expect(barChartInstance.config.data.labels).not.toContain('2024-11');
+
+      // 點擊「全部」快選按鈕後，應顯示包含 2024-11 的歷史資料
+      const allBtn = Array.from(container.querySelectorAll('button')).find((b) =>
+        b.textContent?.trim() === '全部'
+      );
+      expect(allBtn).toBeDefined();
+      allBtn!.click();
+      await flushAsyncWork();
+
+      barChartInstance = mockChartInstances
+        .filter((inst) => inst.config?.type === 'bar')
+        .pop();
       expect(barChartInstance).toBeDefined();
 
       // 驗證傳入之長條圖資料與設定符合 0 軸堆疊規格
