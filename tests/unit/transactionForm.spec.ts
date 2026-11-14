@@ -673,15 +673,20 @@ describe('Milestone 5: TransactionForm 模組化拆分與歷史選單單元測�
           foreignCheckbox.dispatchEvent(new Event('change'));
           await flushAsync();
 
-          // 輸入外幣金額 100，台幣扣款 3200
+          // 透過商品明細單價輸入 100，自動同步外幣金額 100，再輸入台幣扣款 3200
+          const itemPriceInput = (container.querySelector('#expense-amount') ||
+            container.querySelector('input[placeholder="單價"]')) as HTMLInputElement;
           const foreignAmountInput = (container.querySelector('#foreign-expense-amount') ||
             container.querySelector('input[placeholder*="外幣金額"]')) as HTMLInputElement;
           const netTwdInput = (container.querySelector('#net-twd-amount') ||
             container.querySelector('input[placeholder*="台幣扣款"]')) as HTMLInputElement;
 
-          if (foreignAmountInput && netTwdInput) {
-            foreignAmountInput.value = '100';
-            foreignAmountInput.dispatchEvent(new Event('input'));
+          if (itemPriceInput && foreignAmountInput && netTwdInput) {
+            itemPriceInput.value = '100';
+            itemPriceInput.dispatchEvent(new Event('input'));
+            await flushAsync();
+            expect(foreignAmountInput.value).toBe('100');
+
             netTwdInput.value = '3200';
             netTwdInput.dispatchEvent(new Event('input'));
 
@@ -1397,7 +1402,7 @@ describe('Milestone 5: TransactionForm 模組化拆分與歷史選單單元測�
         }
       });
 
-      it('海外支出模式下，在商品單價為 0 時，使用者手填 #foreign-expense-amount 金額不會被 Watcher 清空或重設為 0', async () => {
+      it('海外支出模式下，#foreign-expense-amount 應為唯讀且自動同步商品明細扣除折扣後的金額', async () => {
         vi.mocked(dbModule.getPaymentMethods).mockResolvedValue(['現金']);
         const { container, cleanup } = mountComponent(ExpenseForm);
         await flushAsync();
@@ -1413,29 +1418,32 @@ describe('Milestone 5: TransactionForm 模組化拆分與歷史選單單元測�
 
           const foreignAmountInput = container.querySelector('#foreign-expense-amount') as HTMLInputElement | null;
           expect(foreignAmountInput, '海外模式下應存在 #foreign-expense-amount 外幣金額輸入框').not.toBeNull();
+          expect(foreignAmountInput!.readOnly, '#foreign-expense-amount 必須為唯讀').toBe(true);
+          expect(foreignAmountInput!.getAttribute('aria-readonly')).toBe('true');
 
-          // 2. 填寫店家與商品（單價為 0 的贈品），手填外幣金額 100
+          // 2. 填寫店家與商品（單價 120）
           const merchantInput = container.querySelector('#merchant-input') as HTMLInputElement;
           merchantInput.value = '海外免稅店';
           merchantInput.dispatchEvent(new Event('input'));
 
           const itemNameInput = container.querySelector('#expense-name') as HTMLInputElement;
-          itemNameInput.value = '贈品';
+          itemNameInput.value = '伴手禮';
           itemNameInput.dispatchEvent(new Event('input'));
+
           const itemCatSelect = container.querySelector('#expense-category') as HTMLSelectElement;
           if (itemCatSelect && itemCatSelect.options.length > 0) {
             itemCatSelect.value = itemCatSelect.options[0].value;
             itemCatSelect.dispatchEvent(new Event('change'));
           }
+
+          const itemPriceInput = container.querySelector('#expense-amount') as HTMLInputElement;
+          itemPriceInput.value = '120';
+          itemPriceInput.dispatchEvent(new Event('input'));
           await flushAsync();
 
-          foreignAmountInput!.value = '100';
-          foreignAmountInput!.dispatchEvent(new Event('input'));
-          await flushAsync();
+          expect(foreignAmountInput!.value).toBe('120');
 
-          expect(foreignAmountInput!.value).toBe('100');
-
-          // 3. 模擬觸發 Watcher 監聽的相依來源變動（新增折扣後移除，使 discountsTotal 經歷變動回到 0）
+          // 3. 新增折扣 20，驗證外幣金額自動同步為 120 - 20 = 100
           const addDiscountBtn = Array.from(container.querySelectorAll('button')).find((b) =>
             b.textContent?.includes('新增折扣')
           ) as HTMLButtonElement;
@@ -1443,26 +1451,23 @@ describe('Milestone 5: TransactionForm 模組化拆分與歷史選單單元測�
           addDiscountBtn.click();
           await flushAsync();
 
-          const discAmountInput = container.querySelector('input[placeholder="折抵金額"]') as HTMLInputElement;
-          if (discAmountInput) {
-            discAmountInput.value = '10';
-            discAmountInput.dispatchEvent(new Event('input'));
-            await flushAsync();
-          }
+          const discNameInput = container.querySelector('#disc-name-0') as HTMLInputElement;
+          expect(discNameInput, '應存在折扣名稱輸入框').not.toBeNull();
+          discNameInput.value = '會員折扣';
+          discNameInput.dispatchEvent(new Event('input'));
 
-          const removeDiscBtn = container.querySelector('button[aria-label="刪除此折扣"]') as HTMLButtonElement;
-          expect(removeDiscBtn, '應存在折扣刪除按鈕').toBeDefined();
-          expect(removeDiscBtn.textContent?.trim()).toBe('刪除');
-          removeDiscBtn.click();
+          const discAmountInput = container.querySelector('input[placeholder="折抵金額"]') as HTMLInputElement;
+          expect(discAmountInput, '應存在折抵金額輸入框').not.toBeNull();
+          discAmountInput.value = '20';
+          discAmountInput.dispatchEvent(new Event('input'));
           await flushAsync();
 
-          // 4. 驗證在商品小計依然為 0 的情況下，使用者手填之外幣金額不得被 Watcher 清空或覆蓋為 0 或空字串
           expect(
             foreignAmountInput!.value,
-            '品項小計為 0 時，Watcher 不得清空或重設使用者手填之外幣金額'
+            '套用折扣 20 後，外幣金額應自動同步為 100'
           ).toBe('100');
 
-          // 5. 使用者填寫台幣扣款與手續費並儲存，驗證儲存之外幣總額確實保留手填之 100
+          // 4. 填寫台幣扣款與手續費並儲存，驗證儲存之外幣總額為自動同步之 100
           const netTwdInput = container.querySelector('#net-twd-amount') as HTMLInputElement;
           netTwdInput.value = '3200';
           netTwdInput.dispatchEvent(new Event('input'));
@@ -1484,7 +1489,7 @@ describe('Milestone 5: TransactionForm 模組化拆分與歷史選單單元測�
           expect(savedRecord.isForeign).toBe(true);
           expect(
             savedRecord.foreignAmount,
-            '儲存記錄中外幣金額必須為使用者手填之 100'
+            '儲存記錄中外幣金額必須為商品明細扣除折扣後自動同步之 100'
           ).toBe(100);
         } finally {
           cleanup();

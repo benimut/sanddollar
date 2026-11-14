@@ -373,13 +373,11 @@ const discountsTotal = computed(() => {
   return discounts.value.reduce((sum, disc) => sum + (Number(disc.amount) || 0), 0);
 });
 
-// 海外支出模式下外幣金額與商品明細小計/折扣動態連動
+// 海外支出模式下外幣金額唯讀，無條件自動同步為商品明細扣除折扣後的金額
 watch([isForeignExpense, itemsSubtotal, discountsTotal], () => {
   if (isForeignExpense.value) {
-    if (itemsSubtotal.value > 0) {
-      const calc = itemsSubtotal.value - discountsTotal.value;
-      foreignExpenseAmount.value = calc >= 0 ? calc : 0;
-    }
+    const calc = itemsSubtotal.value - discountsTotal.value;
+    foreignExpenseAmount.value = calc >= 0 ? calc : 0;
   }
 });
 
@@ -1338,9 +1336,11 @@ async function handleSaveExpense() {
             v-model.number="foreignExpenseAmount"
             type="number"
             step="any"
-            placeholder="外幣金額"
+            readonly
+            aria-readonly="true"
+            placeholder="由商品明細扣除折扣自動帶入"
             :class="errorBorderClass('foreign-amount')"
-            class="w-full text-sm border border-slate-200 rounded-lg p-2 bg-white focus:ring-2 focus:ring-teal-500 focus:outline-none"
+            class="w-full text-sm border border-slate-200 rounded-lg p-2 bg-slate-100 text-slate-500 cursor-not-allowed focus:outline-none"
           />
         </div>
       </div>

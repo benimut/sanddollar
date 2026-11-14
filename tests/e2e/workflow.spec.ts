@@ -132,9 +132,12 @@ test.describe('Sand Dollar 端對端核心業務流程 (E2E Workflow)', () => {
     const merchantInput = page.locator('#merchant-input');
     await merchantInput.fill('Amazon JP');
 
-    // 輸入外幣金額 USD 100
+    // 填寫商品明細單價 USD 100，驗證外幣金額為唯讀並自動同步為 100
+    await page.locator('#expense-name').fill('Amazon 商品');
+    await page.locator('#expense-amount').fill('100');
     const foreignAmountInput = page.locator('#foreign-expense-amount');
-    await foreignAmountInput.fill('100');
+    await expect(foreignAmountInput).toHaveAttribute('readonly', '');
+    await expect(foreignAmountInput).toHaveValue('100');
 
     // 輸入台幣扣款 3200
     const twdAmountInput = page.locator('#net-twd-amount');
