@@ -17,6 +17,7 @@ import {
   addIncome,
   updateIncome,
   getDistinctIncomeSources,
+  getPreferredIncomeSource,
   getIncomeSourceRecords,
   addIncomeSource,
 } from '@/db';
@@ -44,6 +45,8 @@ const isForeignIncome = ref(false);
 
 // 歷史收入來源不重複清單
 const distinctSources = ref<string[]>([]);
+/** 使用者設定的預設收入來源 */
+const defaultIncomeSource = ref('');
 
 /** 是否正在新增自訂收入來源 */
 const isAddingSource = ref(false);
@@ -60,6 +63,7 @@ const incomeCategory = ref('');
 // 使用共用 Composable 管理收入分類
 const {
   categories: incomeCategoryList,
+  defaultCategory: defaultIncomeCategory,
   showAddCategory,
   newCategoryName,
   categoryError,
@@ -226,8 +230,15 @@ onMounted(async () => {
   isListsLoaded.value = true;
   if (isEditMode.value) {
     reconcileEditSelections();
-  } else if (incomeCategoryList.value.length > 0 && !incomeCategory.value) {
-    incomeCategory.value = incomeCategoryList.value[0];
+  } else {
+    if (incomeCategoryList.value.length > 0 && !incomeCategory.value) {
+      incomeCategory.value = defaultIncomeCategory.value || incomeCategoryList.value[0];
+    }
+    if (distinctSources.value.length > 0 && !selectedSourceOption.value) {
+      const defSource = defaultIncomeSource.value || distinctSources.value[0];
+      selectedSourceOption.value = defSource;
+      incomeSource.value = defSource;
+    }
   }
 });
 
@@ -236,9 +247,16 @@ onMounted(async () => {
  */
 async function loadDistinctSources() {
   try {
-    distinctSources.value = await getDistinctIncomeSources();
+    const [sources, preferred] = await Promise.all([
+      getDistinctIncomeSources(),
+      getPreferredIncomeSource(),
+    ]);
+    distinctSources.value = sources;
+    defaultIncomeSource.value =
+      preferred && sources.includes(preferred) ? preferred : sources[0] || '';
   } catch {
     distinctSources.value = [];
+    defaultIncomeSource.value = '';
   }
 }
 
@@ -292,9 +310,10 @@ function handleCategoryChange(e: Event) {
 function resetForm() {
   clearValidationError();
   incomeDate.value = getTodayDateString();
-  incomeSource.value = '';
+  const defSource = defaultIncomeSource.value || distinctSources.value[0] || '';
+  incomeSource.value = defSource;
   customSourceName.value = '';
-  selectedSourceOption.value = '';
+  selectedSourceOption.value = defSource;
   isAddingSource.value = false;
   incomeAmount.value = '';
   incomeNote.value = '';
@@ -303,7 +322,7 @@ function resetForm() {
   isForeignIncome.value = false;
   showAddCategory.value = false;
   newCategoryName.value = '';
-  incomeCategory.value = incomeCategoryList.value[0] || '';
+  incomeCategory.value = defaultIncomeCategory.value || incomeCategoryList.value[0] || '';
 }
 
 /**

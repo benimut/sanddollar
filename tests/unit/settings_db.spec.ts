@@ -16,19 +16,27 @@ import {
   deleteCategory,
   addCategory,
   getCategories,
+  setPreferredCategory,
+  getPreferredCategoryName,
   getPaymentMethodRecords,
   addPaymentMethod,
   updatePaymentMethod,
   deletePaymentMethod,
+  setPreferredPaymentMethod,
+  getPreferredPaymentMethod,
   getIncomeSourceRecords,
   addIncomeSource,
   updateIncomeSource,
   deleteIncomeSource,
+  setPreferredIncomeSource,
+  getPreferredIncomeSource,
   getDistinctIncomeSources,
   getRewardSourceRecords,
   addRewardSource,
   updateRewardSource,
   deleteRewardSource,
+  setPreferredRewardSource,
+  getPreferredRewardSource,
   clearAllDatabaseData,
   clearMerchantItemsCache,
   cacheMerchantItems,
@@ -858,9 +866,9 @@ describe('Sand Dollar 設定頁面資料庫 CRUD 與全庫清空單元測試 (se
   // 6. 資料庫版本升級 (version 4) 與歷史來源自動遷移測試
   // ==========================================
   describe('資料庫版本升級 (version 4) 與歷史來源自動遷移', () => {
-    it('TrackerDatabase 應宣告 version(4) 並包含 incomeSources 與 rewardSources 資料表', async () => {
-      // 驗證目前資料庫版本號為 4
-      expect(db.verno).toBe(4);
+    it('TrackerDatabase 應宣告 version(5) 並包含 incomeSources 與 rewardSources 資料表', async () => {
+      // 驗證目前資料庫版本號為 5
+      expect(db.verno).toBe(5);
 
       // 驗證 7 個表格皆正常宣告存在
       expect(db.tables.map((t) => t.name)).toEqual(
@@ -911,7 +919,7 @@ describe('Sand Dollar 設定頁面資料庫 CRUD 與全庫清空單元測試 (se
       const upgradedDb = new TrackerDatabase(upgradeDbName);
       await upgradedDb.open();
 
-      expect(upgradedDb.verno).toBe(4);
+      expect(upgradedDb.verno).toBe(5);
 
       // 3. 驗證 incomeSources 自動提取與去重結果
       const incomeSources = await upgradedDb.incomeSources.toArray();
@@ -927,6 +935,98 @@ describe('Sand Dollar 設定頁面資料庫 CRUD 與全庫清空單元測試 (se
 
       upgradedDb.close();
       await Dexie.delete(upgradeDbName);
+    });
+  });
+
+  // ==========================================
+  // 7. 選單預設項目 (isPreferred) 與 version(5) 遷移測試
+  // ==========================================
+  describe('選單預設項目 (isPreferred) 管理與舊資料庫遷移', () => {
+    it('新增第一筆分類與設定項目時應自動設為預設，後續新增不會覆蓋原有預設', async () => {
+      const cat1 = await addCategory({ name: '餐飲', type: 'expense', isDefault: false });
+      const cat2 = await addCategory({ name: '交通', type: 'expense', isDefault: false });
+      const cats = await getCategories('expense');
+      expect(cats.find((c) => c.id === cat1)?.isPreferred).toBe(true);
+      expect(cats.find((c) => c.id === cat2)?.isPreferred).toBe(false);
+      expect(await getPreferredCategoryName('expense')).toBe('餐飲');
+
+      const pm1 = await addPaymentMethod('現金');
+      const pm2 = await addPaymentMethod('信用卡');
+      const pms = await getPaymentMethodRecords();
+      expect(pms.find((p) => p.id === pm1)?.isPreferred).toBe(true);
+      expect(pms.find((p) => p.id === pm2)?.isPreferred).toBe(false);
+      expect(await getPreferredPaymentMethod()).toBe('現金');
+    });
+
+    it('setPreferred 系列函式應切換同清單中的唯一預設項目，刪除預設時自動遞補第一項', async () => {
+      const idA = await addCategory({ name: 'B餐飲', type: 'expense', isDefault: false });
+      const idB = await addCategory({ name: 'A交通', type: 'expense', isDefault: false });
+      await setPreferredCategory(idB);
+      expect(await getPreferredCategoryName('expense')).toBe('A交通');
+
+      // 刪除目前預設 'A交通'，剩餘只有 'B餐飲' 應自動成為預設
+      await deleteCategory(idB);
+      const remaining = await getCategories('expense');
+      expect(remaining).toHaveLength(1);
+      expect(remaining[0].id).toBe(idA);
+      expect(remaining[0].isPreferred).toBe(true);
+      expect(await getPreferredCategoryName('expense')).toBe('B餐飲');
+
+      // 測試收入來源與回饋來源切換預設
+      const src1 = await addIncomeSource('接案');
+      const src2 = await addIncomeSource('薪資');
+      await setPreferredIncomeSource(src2);
+      expect(await getPreferredIncomeSource()).toBe('薪資');
+      await deleteIncomeSource(src2);
+      expect(await getPreferredIncomeSource()).toBe('接案');
+
+      const rew1 = await addRewardSource('LINE POINTS');
+      const rew2 = await addRewardSource('Pi 拍錢包');
+      await setPreferredRewardSource(rew2);
+      expect(await getPreferredRewardSource()).toBe('Pi 拍錢包');
+      await deleteRewardSource(rew2);
+      expect(await getPreferredRewardSource()).toBe('LINE POINTS');
+      // 避免 unused variable 警告
+      expect(src1).toBeDefined();
+      expect(rew1).toBeDefined();
+    });
+
+    it('version(5) upgrade 遷移應為既有非空清單自動補齊自然排序第一項為預設', async () => {
+      const upgradeV5Name = `UpgradeV5TestDB_${Date.now()}`;
+      const oldDb = new Dexie(upgradeV5Name);
+      oldDb.version(4).stores({
+        expenses: '++id, date, merchant, paymentMethod, totalAmount, isForeign',
+        incomes: '++id, date, source, category, amount, isForeign',
+        rewards: '++id, yearMonth, sourceName',
+        categories: '++id, name, type, isDefault, [type+name]',
+        paymentMethods: '++id, name, isDefault',
+        incomeSources: '++id, name, isDefault',
+        rewardSources: '++id, name, isDefault',
+      });
+      await oldDb.open();
+      await oldDb.table('categories').bulkAdd([
+        { name: '餐飲', type: 'expense', isDefault: false },
+        { name: '交通', type: 'expense', isDefault: false },
+      ]);
+      await oldDb.table('paymentMethods').bulkAdd([
+        { name: '現金', isDefault: false },
+        { name: '信用卡', isDefault: false },
+      ]);
+      oldDb.close();
+
+      const upgradedDb = new TrackerDatabase(upgradeV5Name);
+      await upgradedDb.open();
+
+      const cats = await upgradedDb.categories.where('type').equals('expense').toArray();
+      const preferredCat = cats.find((c) => c.isPreferred === true);
+      expect(preferredCat).toBeDefined();
+
+      const pms = await upgradedDb.paymentMethods.toArray();
+      const preferredPm = pms.find((p) => p.isPreferred === true);
+      expect(preferredPm).toBeDefined();
+
+      upgradedDb.close();
+      await Dexie.delete(upgradeV5Name);
     });
   });
 });

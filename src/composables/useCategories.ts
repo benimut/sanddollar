@@ -40,6 +40,9 @@ export interface UseCategoriesReturn {
   /** 當前分類名稱字串清單 (響應式陣列) */
   categories: Ref<string[]>;
 
+  /** 當前預設分類名稱 (響應式字串；若無明確指定則回傳排序第一項，空清單為空字串) */
+  defaultCategory: Ref<string>;
+
   /** 是否展開自訂分類輸入介面 (響應式布林值) */
   showAddCategory: Ref<boolean>;
 
@@ -89,6 +92,7 @@ export function useCategories(
     : [];
 
   const categories = ref<string[]>([...defaultList]);
+  const defaultCategory = ref<string>(defaultList[0] || '');
   const showAddCategory = ref(false);
   const newCategoryName = ref('');
   const categoryError = ref('');
@@ -115,6 +119,10 @@ export function useCategories(
           ...records.map((r) => r.name),
         ]);
         categories.value = sortStringsNaturally(Array.from(merged));
+        const preferred = records.find((r) => r.isPreferred === true);
+        defaultCategory.value = preferred?.name ?? categories.value[0] ?? '';
+      } else {
+        defaultCategory.value = categories.value[0] ?? '';
       }
     } catch {
       // 讀取異常時靜默降級，維持現有分類
@@ -170,6 +178,7 @@ export function useCategories(
 
   return {
     categories,
+    defaultCategory,
     showAddCategory,
     newCategoryName,
     categoryError,

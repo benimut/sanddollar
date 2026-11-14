@@ -17,6 +17,7 @@ import {
   getRewardSourceRecords,
   addRewardSource,
   getDistinctRewardSources,
+  getPreferredRewardSource,
 } from '@/db';
 import { getCurrentMonthString } from '@/utils/date';
 import type { MonthlyReward } from '@/types';
@@ -35,6 +36,8 @@ const isEditMode = computed(() => !!props.editData && !!props.editData.id);
 
 // 歷史回饋來源清單
 const distinctRewardSources = ref<string[]>([]);
+/** 使用者設定的預設回饋來源 */
+const defaultRewardSource = ref('');
 const isAddingSource = ref(false);
 const customSourceName = ref('');
 const selectedSourceOption = ref('');
@@ -82,7 +85,13 @@ function reconcileEditSelections() {
 onMounted(async () => {
   await loadDistinctRewardSources();
   isListsLoaded.value = true;
-  reconcileEditSelections();
+  if (isEditMode.value) {
+    reconcileEditSelections();
+  } else if (distinctRewardSources.value.length > 0 && !selectedSourceOption.value) {
+    const defSource = defaultRewardSource.value || distinctRewardSources.value[0];
+    selectedSourceOption.value = defSource;
+    sourceName.value = defSource;
+  }
 });
 
 /**
@@ -90,9 +99,16 @@ onMounted(async () => {
  */
 async function loadDistinctRewardSources() {
   try {
-    distinctRewardSources.value = await getDistinctRewardSources();
+    const [sources, preferred] = await Promise.all([
+      getDistinctRewardSources(),
+      getPreferredRewardSource(),
+    ]);
+    distinctRewardSources.value = sources;
+    defaultRewardSource.value =
+      preferred && sources.includes(preferred) ? preferred : sources[0] || '';
   } catch {
     distinctRewardSources.value = [];
+    defaultRewardSource.value = '';
   }
 }
 
@@ -144,8 +160,9 @@ function handleCustomSourceInput(e: Event) {
 function resetForm() {
   clearValidationError();
   rewardMonth.value = getCurrentMonthString();
-  sourceName.value = '';
-  selectedSourceOption.value = '';
+  const defSource = defaultRewardSource.value || distinctRewardSources.value[0] || '';
+  sourceName.value = defSource;
+  selectedSourceOption.value = defSource;
   isAddingSource.value = false;
   customSourceName.value = '';
   amount.value = '';

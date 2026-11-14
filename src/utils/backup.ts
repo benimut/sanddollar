@@ -6,7 +6,7 @@
  */
 
 import type { Table } from 'dexie';
-import { TrackerDatabase, db } from '@/db';
+import { TrackerDatabase, db, ensureAllPreferredDefaults } from '@/db';
 import type {
   ExpenseRecord,
   IncomeRecord,
@@ -307,6 +307,9 @@ export async function importBackupData(
         }
       });
     }
+
+    // 確保舊版備份還原後各非空設定清單皆具備預設項目
+    await ensureAllPreferredDefaults(targetDb);
 
     const importedCount: ImportBackupResult['importedCount'] = {
       expenses: expenses.length,

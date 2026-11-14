@@ -12,6 +12,7 @@ import type {
   MonthlyReward,
   ExpenseItem,
   CategoryRecord,
+  CategoryType,
   PaymentMethodRecord,
   IncomeSourceRecord,
   RewardSourceRecord,
@@ -129,6 +130,28 @@ export class TrackerDatabase extends Dexie {
       await migrateUniqueField(trans, 'rewards', 'sourceName', 'rewardSources');
     });
 
+    // 版本 5 定義：為既有非空設定清單自動補齊使用者選單預設項目 (isPreferred)
+    this.version(5).stores({
+      expenses: '++id, date, merchant, paymentMethod, totalAmount, isForeign',
+      incomes: '++id, date, source, category, amount, isForeign',
+      rewards: '++id, yearMonth, sourceName',
+      categories: '++id, name, type, isDefault, [type+name]',
+      paymentMethods: '++id, name, isDefault',
+      incomeSources: '++id, name, isDefault',
+      rewardSources: '++id, name, isDefault',
+    }).upgrade(async (trans) => {
+      const catTable = trans.table<CategoryRecord, number>('categories');
+      for (const catType of ['expense', 'income'] as const) {
+        const cats = await catTable.where('type').equals(catType).toArray();
+        await ensurePreferredInRecords(catTable, cats);
+      }
+      for (const tableName of ['paymentMethods', 'incomeSources', 'rewardSources'] as const) {
+        const tbl = trans.table<{ id?: number; name: string; isPreferred?: boolean }, number>(tableName);
+        const rows = await tbl.toArray();
+        await ensurePreferredInRecords(tbl, rows);
+      }
+    });
+
     this.setupAutoIncrementReset(this.expenses);
     this.setupAutoIncrementReset(this.incomes);
     this.setupAutoIncrementReset(this.rewards);
@@ -172,6 +195,97 @@ export class TrackerDatabase extends Dexie {
  * 全域預設單例資料庫實例
  */
 export const db = new TrackerDatabase();
+
+/**
+ * 內部輔助函式：確保指定記錄清單在非空時至少有一項被標記為使用者預設 (isPreferred)
+ * 若尚無任何預設項目，自動將自然排序第一項標記為預設。
+ *
+ * @param table - Dexie 資料表實例
+ * @param records - 已查詢出的該群組記錄陣列
+ */
+async function ensurePreferredInRecords<T extends { id?: number; name: string; isPreferred?: boolean }>(
+  table: Table<T, number>,
+  records: T[]
+): Promise<void> {
+  if (records.length === 0) return;
+  if (records.some((r) => r.isPreferred === true)) return;
+  const first = sortByNameNaturally(records)[0];
+  if (first?.id !== undefined) {
+    await table.update(first.id, { isPreferred: true } as any);
+  }
+}
+
+/**
+ * 內部輔助函式：將資料表中的指定記錄設為唯一預設項目
+ *
+ * @param table - Dexie 資料表實例
+ * @param id - 目標記錄 ID
+ * @param records - 同群組記錄陣列
+ */
+async function markPreferredInRecords<T extends { id?: number; isPreferred?: boolean }>(
+  table: Table<T, number>,
+  id: number,
+  records: T[]
+): Promise<void> {
+  const target = records.find((r) => r.id === id);
+  if (!target) return;
+
+  for (const record of records) {
+    if (record.id === undefined) continue;
+    const shouldBePreferred = record.id === id;
+    if (Boolean(record.isPreferred) !== shouldBePreferred) {
+      await table.update(record.id, { isPreferred: shouldBePreferred } as any);
+    }
+  }
+}
+
+/**
+ * 內部輔助函式：從同群組記錄中取得預設項目名稱（無標記時回傳自然排序第一項）
+ *
+ * @param records - 同群組記錄陣列
+ * @returns 預設項目名稱，若清單為空則回傳空字串
+ */
+function resolvePreferredName<T extends { name: string; isPreferred?: boolean }>(records: T[]): string {
+  if (records.length === 0) return '';
+  const preferred = records.find((r) => r.isPreferred === true);
+  if (preferred) return preferred.name;
+  return sortByNameNaturally(records)[0]?.name ?? '';
+}
+
+/**
+ * 確保資料庫中所有設定清單（支出分類、收入分類、支付方式、收入來源、回饋來源）
+ * 在非空狀態下皆具備預設項目 (isPreferred)
+ * 主要用於舊版備份還原後的資料補齊
+ *
+ * @param dbInstance - 選填之資料庫實例，預設使用全域 db
+ */
+export async function ensureAllPreferredDefaults(dbInstance?: TrackerDatabase): Promise<void> {
+  const targetDb = dbInstance ?? db;
+  const tables: Table[] = [];
+  if (targetDb.categories) tables.push(targetDb.categories);
+  if (targetDb.paymentMethods) tables.push(targetDb.paymentMethods);
+  if (targetDb.incomeSources) tables.push(targetDb.incomeSources);
+  if (targetDb.rewardSources) tables.push(targetDb.rewardSources);
+  if (tables.length === 0) return;
+
+  await targetDb.transaction('rw', tables, async () => {
+    if (targetDb.categories) {
+      for (const catType of ['expense', 'income'] as const) {
+        const cats = await targetDb.categories.where('type').equals(catType).toArray();
+        await ensurePreferredInRecords(targetDb.categories, cats);
+      }
+    }
+    if (targetDb.paymentMethods) {
+      await ensurePreferredInRecords(targetDb.paymentMethods, await targetDb.paymentMethods.toArray());
+    }
+    if (targetDb.incomeSources) {
+      await ensurePreferredInRecords(targetDb.incomeSources, await targetDb.incomeSources.toArray());
+    }
+    if (targetDb.rewardSources) {
+      await ensurePreferredInRecords(targetDb.rewardSources, await targetDb.rewardSources.toArray());
+    }
+  });
+}
 
 /**
  * 取得分類清單，可選依支出或收入類別進行過濾
@@ -221,10 +335,14 @@ export async function addCategory(category: Omit<CategoryRecord, 'id'>): Promise
       throw new Error(`分類「${cleanName}」已存在`);
     }
 
+    const sameTypeRecords = await db.categories.where('type').equals(category.type).toArray();
+    const hasPreferred = sameTypeRecords.some((c) => c.isPreferred === true);
+
     const id = await db.categories.add({
       name: cleanName,
       type: category.type,
       isDefault: category.isDefault ?? false,
+      isPreferred: category.isPreferred ?? !hasPreferred,
     });
     return id as number;
   });
@@ -299,11 +417,44 @@ export async function updateCategory(id: number, name: string): Promise<number> 
 
 /**
  * 刪除指定 ID 之分類記錄
+ * 若刪除的剛好是預設分類，自動將同類型剩餘自然排序第一項設為預設
  *
  * @param id - 分類 ID
  */
 export async function deleteCategory(id: number): Promise<void> {
-  await db.categories.delete(id);
+  await db.transaction('rw', db.categories, async () => {
+    const target = await db.categories.get(id);
+    await db.categories.delete(id);
+    if (target) {
+      const remaining = await db.categories.where('type').equals(target.type).toArray();
+      await ensurePreferredInRecords(db.categories, remaining);
+    }
+  });
+}
+
+/**
+ * 將指定 ID 之分類設為同類型中的預設項目
+ *
+ * @param id - 分類 ID
+ */
+export async function setPreferredCategory(id: number): Promise<void> {
+  await db.transaction('rw', db.categories, async () => {
+    const target = await db.categories.get(id);
+    if (!target) return;
+    const sameTypeRecords = await db.categories.where('type').equals(target.type).toArray();
+    await markPreferredInRecords(db.categories, id, sameTypeRecords);
+  });
+}
+
+/**
+ * 取得指定分類類型目前的預設分類名稱（若無標記則回傳自然排序第一項，空清單回傳空字串）
+ *
+ * @param type - 分類類型 ('expense' | 'income')
+ * @returns 預設分類名稱
+ */
+export async function getPreferredCategoryName(type: CategoryType): Promise<string> {
+  const records = await db.categories.where('type').equals(type).toArray();
+  return resolvePreferredName(records);
 }
 
 /**
@@ -338,7 +489,9 @@ async function fetchDistinctNames<T extends { name: string }>(
  * @param options - 選擇性防呆配置（預設 fallback 名稱、是否允許重複時回傳既有識別碼）
  * @returns 新增或既有記錄之 ID
  */
-async function addItemRecord<T extends { id?: number; name: string; isDefault?: boolean }>(
+async function addItemRecord<
+  T extends { id?: number; name: string; isDefault?: boolean; isPreferred?: boolean }
+>(
   table: Table<T, number>,
   typeLabel: string,
   rawName: string,
@@ -354,20 +507,72 @@ async function addItemRecord<T extends { id?: number; name: string; isDefault?: 
     }
   }
 
-  const existing = await table.where('name').equals(cleanName).first();
+  return await db.transaction('rw', table, async () => {
+    const existing = await table.where('name').equals(cleanName).first();
 
-  if (existing) {
-    if (trimmed.length === 0 && options?.allowFallbackExisting) {
-      return existing.id as number;
+    if (existing) {
+      if (trimmed.length === 0 && options?.allowFallbackExisting) {
+        return existing.id as number;
+      }
+      throw new Error(`${typeLabel}「${cleanName}」已存在`);
     }
-    throw new Error(`${typeLabel}「${cleanName}」已存在`);
-  }
 
-  const id = await table.add({
-    name: cleanName,
-    isDefault: false,
-  } as unknown as T);
-  return id as number;
+    const allRecords = await table.toArray();
+    const hasPreferred = allRecords.some((r) => r.isPreferred === true);
+
+    const id = await table.add({
+      name: cleanName,
+      isDefault: false,
+      isPreferred: !hasPreferred,
+    } as unknown as T);
+    return id as number;
+  });
+}
+
+/**
+ * 內部輔助函式：刪除設定項目並在該項目為預設時自動遞補剩餘第一項為預設
+ *
+ * @param table - 目標設定資料表
+ * @param id - 欲刪除之項目 ID
+ */
+async function deleteItemAndEnsurePreferred<
+  T extends { id?: number; name: string; isPreferred?: boolean }
+>(table: Table<T, number>, id: number): Promise<void> {
+  await db.transaction('rw', table, async () => {
+    await table.delete(id);
+    const remaining = await table.toArray();
+    await ensurePreferredInRecords(table, remaining);
+  });
+}
+
+/**
+ * 內部輔助函式：將資料表指定 ID 設為唯一預設項目
+ *
+ * @param table - 目標設定資料表
+ * @param id - 目標項目 ID
+ */
+async function setPreferredInTable<T extends { id?: number; isPreferred?: boolean }>(
+  table: Table<T, number>,
+  id: number
+): Promise<void> {
+  await db.transaction('rw', table, async () => {
+    const records = await table.toArray();
+    await markPreferredInRecords(table, id, records);
+  });
+}
+
+/**
+ * 內部輔助函式：取得資料表目前的預設項目名稱（無標記時回傳自然排序第一項）
+ *
+ * @param table - 目標設定資料表
+ * @returns 預設項目名稱，若資料表為空則回傳空字串
+ */
+async function getPreferredItemName<T extends { name: string; isPreferred?: boolean }>(
+  table?: Table<T, number>
+): Promise<string> {
+  if (!table) return '';
+  const records = await table.toArray();
+  return resolvePreferredName(records);
 }
 
 /**
@@ -628,7 +833,25 @@ export async function updatePaymentMethod(id: number, name: string): Promise<num
  * @param id - 支付方式 ID
  */
 export async function deletePaymentMethod(id: number): Promise<void> {
-  await db.paymentMethods.delete(id);
+  await deleteItemAndEnsurePreferred(db.paymentMethods, id);
+}
+
+/**
+ * 將指定 ID 之支付方式設為預設項目
+ *
+ * @param id - 支付方式 ID
+ */
+export async function setPreferredPaymentMethod(id: number): Promise<void> {
+  await setPreferredInTable(db.paymentMethods, id);
+}
+
+/**
+ * 取得目前的預設支付方式名稱
+ *
+ * @returns 預設支付方式名稱，若清單為空則回傳空字串
+ */
+export async function getPreferredPaymentMethod(): Promise<string> {
+  return getPreferredItemName(db.paymentMethods);
 }
 
 /**
@@ -678,7 +901,25 @@ export async function updateIncomeSource(id: number, name: string): Promise<numb
  * @param id - 收入來源 ID
  */
 export async function deleteIncomeSource(id: number): Promise<void> {
-  await db.incomeSources.delete(id);
+  await deleteItemAndEnsurePreferred(db.incomeSources, id);
+}
+
+/**
+ * 將指定 ID 之收入來源設為預設項目
+ *
+ * @param id - 收入來源 ID
+ */
+export async function setPreferredIncomeSource(id: number): Promise<void> {
+  await setPreferredInTable(db.incomeSources, id);
+}
+
+/**
+ * 取得目前的預設收入來源名稱
+ *
+ * @returns 預設收入來源名稱，若清單為空則回傳空字串
+ */
+export async function getPreferredIncomeSource(): Promise<string> {
+  return getPreferredItemName(db.incomeSources);
 }
 
 /**
@@ -738,7 +979,25 @@ export async function updateRewardSource(id: number, name: string): Promise<numb
  * @param id - 回饋來源 ID
  */
 export async function deleteRewardSource(id: number): Promise<void> {
-  await db.rewardSources.delete(id);
+  await deleteItemAndEnsurePreferred(db.rewardSources, id);
+}
+
+/**
+ * 將指定 ID 之回饋來源設為預設項目
+ *
+ * @param id - 回饋來源 ID
+ */
+export async function setPreferredRewardSource(id: number): Promise<void> {
+  await setPreferredInTable(db.rewardSources, id);
+}
+
+/**
+ * 取得目前的預設回饋來源名稱
+ *
+ * @returns 預設回饋來源名稱，若清單為空則回傳空字串
+ */
+export async function getPreferredRewardSource(): Promise<string> {
+  return getPreferredItemName(db.rewardSources);
 }
 
 /**

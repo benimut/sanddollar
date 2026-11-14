@@ -12,25 +12,29 @@
  * 6. 危險操作區域：支援清空全庫資料 (clearAllDatabaseData)，具備嚴謹二次防呆警示機制。
  */
 
-import { ref, onMounted } from 'vue';
+import { ref, computed, onMounted } from 'vue';
 import SettingsItemManager from './SettingsItemManager.vue';
 import {
   getCategories,
   addCategory,
   updateCategory,
   deleteCategory,
+  setPreferredCategory,
   getPaymentMethodRecords,
   addPaymentMethod,
   updatePaymentMethod,
   deletePaymentMethod,
+  setPreferredPaymentMethod,
   getIncomeSourceRecords,
   addIncomeSource,
   updateIncomeSource,
   deleteIncomeSource,
+  setPreferredIncomeSource,
   getRewardSourceRecords,
   addRewardSource,
   updateRewardSource,
   deleteRewardSource,
+  setPreferredRewardSource,
   clearAllDatabaseData,
 } from '@/db';
 import { exportBackupData, importBackupData } from '@/utils/backup';
@@ -54,6 +58,13 @@ const newCategoryName = ref('');
 const editingCategoryId = ref<number | null>(null);
 /** 正在編輯中的分類名稱 */
 const editingCategoryName = ref('');
+
+/** 目前生效的預設分類 ID（若無明確標記則以排序第一項為準） */
+const effectiveDefaultCategoryId = computed<number | undefined>(() => {
+  const preferred = categoryList.value.find((c) => c.isPreferred === true);
+  if (preferred?.id !== undefined) return preferred.id;
+  return categoryList.value[0]?.id;
+});
 
 /**
  * 載入指定類型分類清單
@@ -126,6 +137,15 @@ async function handleDeleteCategory(id: number) {
   await loadCategories();
 }
 
+/**
+ * 設定預設分類
+ */
+async function handleSetDefaultCategory(id: number) {
+  if (effectiveDefaultCategoryId.value === id) return;
+  await setPreferredCategory(id);
+  await loadCategories();
+}
+
 // ==================== 2. 支付方式管理狀態 ====================
 /** 當前支付方式清單列表 */
 const paymentMethodList = ref<PaymentMethodRecord[]>([]);
@@ -166,6 +186,14 @@ async function handleUpdatePaymentMethod(payload: { id: number; name: string }) 
  */
 async function handleDeletePaymentMethod(id: number) {
   await deletePaymentMethod(id);
+  await loadPaymentMethods();
+}
+
+/**
+ * 設定預設支付方式
+ */
+async function handleSetDefaultPaymentMethod(id: number) {
+  await setPreferredPaymentMethod(id);
   await loadPaymentMethods();
 }
 
@@ -212,6 +240,14 @@ async function handleDeleteIncomeSource(id: number) {
   await loadIncomeSources();
 }
 
+/**
+ * 設定預設收入來源
+ */
+async function handleSetDefaultIncomeSource(id: number) {
+  await setPreferredIncomeSource(id);
+  await loadIncomeSources();
+}
+
 // ==================== 4. 回饋來源管理狀態 ====================
 /** 當前回饋來源清單列表 */
 const rewardSourceList = ref<RewardSourceRecord[]>([]);
@@ -252,6 +288,14 @@ async function handleUpdateRewardSource(payload: { id: number; name: string }) {
  */
 async function handleDeleteRewardSource(id: number) {
   await deleteRewardSource(id);
+  await loadRewardSources();
+}
+
+/**
+ * 設定預設回饋來源
+ */
+async function handleSetDefaultRewardSource(id: number) {
+  await setPreferredRewardSource(id);
   await loadRewardSources();
 }
 
@@ -492,6 +536,21 @@ onMounted(() => {
             <div class="flex items-center gap-1">
               <button
                 type="button"
+                class="btn-default-category px-1.5 py-1 rounded-lg transition-colors text-sm leading-none"
+                :class="
+                  effectiveDefaultCategoryId === cat.id
+                    ? 'text-amber-500 bg-amber-50/70'
+                    : 'text-slate-300 hover:text-amber-500 hover:bg-amber-50'
+                "
+                :title="effectiveDefaultCategoryId === cat.id ? '目前預設' : '設為預設'"
+                :aria-label="effectiveDefaultCategoryId === cat.id ? '目前預設' : '設為預設'"
+                :data-is-default="effectiveDefaultCategoryId === cat.id ? 'true' : 'false'"
+                @click="handleSetDefaultCategory(cat.id!)"
+              >
+                {{ effectiveDefaultCategoryId === cat.id ? '★' : '☆' }}
+              </button>
+              <button
+                type="button"
                 class="btn-edit-category px-2 py-1 text-slate-500 hover:text-teal-700 hover:bg-teal-50 rounded-lg transition-colors"
                 @click="startEditCategory(cat)"
               >
@@ -525,6 +584,7 @@ onMounted(() => {
       @add="handleAddPaymentMethod"
       @update="handleUpdatePaymentMethod"
       @delete="handleDeletePaymentMethod"
+      @set-default="handleSetDefaultPaymentMethod"
     />
 
     <!-- 3. 常用收入來源管理區塊 -->
@@ -538,6 +598,7 @@ onMounted(() => {
       @add="handleAddIncomeSource"
       @update="handleUpdateIncomeSource"
       @delete="handleDeleteIncomeSource"
+      @set-default="handleSetDefaultIncomeSource"
     />
 
     <!-- 4. 回饋來源管理區塊 -->
@@ -551,6 +612,7 @@ onMounted(() => {
       @add="handleAddRewardSource"
       @update="handleUpdateRewardSource"
       @delete="handleDeleteRewardSource"
+      @set-default="handleSetDefaultRewardSource"
     />
 
     <!-- 5. 本地資料備份與還原 -->
