@@ -31,12 +31,15 @@ interface Props {
   items: ItemRecord[];
   /** 列表無資料時之提示訊息 */
   emptyText?: string;
+  /** 是否允許預設星號多選切換（例如店家常用列表，預設 false 為單選） */
+  multiDefault?: boolean;
 }
 
 const props = withDefaults(defineProps<Props>(), {
   icon: '',
   placeholder: '',
   emptyText: '尚無任何記錄',
+  multiDefault: false,
 });
 
 const emit = defineEmits<{
@@ -117,12 +120,25 @@ function handleDelete(id: number) {
 }
 
 /**
- * 處理設為預設項目
+ * 判斷指定項目是否處於預設／常用狀態
+ *
+ * @param item - 項目物件
+ * @returns 是否顯示為實心星號
+ */
+function isItemDefault(item: ItemRecord): boolean {
+  if (props.multiDefault) {
+    return item.isPreferred === true;
+  }
+  return effectiveDefaultId.value === item.id;
+}
+
+/**
+ * 處理設為預設／切換常用項目
  *
  * @param id - 項目 ID
  */
 function handleSetDefault(id: number) {
-  if (effectiveDefaultId.value === id) return;
+  if (!props.multiDefault && effectiveDefaultId.value === id) return;
   emit('set-default', id);
 }
 </script>
@@ -199,17 +215,17 @@ function handleSetDefault(id: number) {
               type="button"
               :class="[
                 `btn-default-${idPrefix}`,
-                effectiveDefaultId === item.id
+                isItemDefault(item)
                   ? 'text-amber-500 bg-amber-50/70'
                   : 'text-slate-300 hover:text-amber-500 hover:bg-amber-50',
               ]"
               class="px-1.5 py-1 rounded-lg transition-colors text-sm leading-none"
-              :title="effectiveDefaultId === item.id ? '目前預設' : '設為預設'"
-              :aria-label="effectiveDefaultId === item.id ? '目前預設' : '設為預設'"
-              :data-is-default="effectiveDefaultId === item.id ? 'true' : 'false'"
+              :title="isItemDefault(item) ? '目前預設' : '設為預設'"
+              :aria-label="isItemDefault(item) ? '目前預設' : '設為預設'"
+              :data-is-default="isItemDefault(item) ? 'true' : 'false'"
               @click="handleSetDefault(item.id!)"
             >
-              {{ effectiveDefaultId === item.id ? '★' : '☆' }}
+              {{ isItemDefault(item) ? '★' : '☆' }}
             </button>
             <span class="font-medium text-slate-700">{{ item.name }}</span>
           </div>

@@ -23,6 +23,8 @@ import {
   getPreferredPaymentMethod,
   addPaymentMethod,
   getDistinctMerchants,
+  getPreferredMerchants,
+  addMerchant,
   DEFAULT_PAYMENT_METHODS,
 } from '@/db';
 import { useCategories } from '@/composables/useCategories';
@@ -62,6 +64,8 @@ const paymentSelectRef = ref<HTMLSelectElement | null>(null);
 const isMerchantModalOpen = ref(false);
 const merchantOptions = ref<SelectItem<string>[]>([]);
 const distinctMerchants = ref<string[]>([]);
+/** 設定頁標記為常用 (★) 之店家名稱清單 */
+const preferredMerchants = ref<string[]>([]);
 
 /** 觸發新增分類之商品索引（若由全域觸發則為 null） */
 const categoryTargetItemIndex = ref<number | null>(null);
@@ -537,20 +541,34 @@ async function loadPaymentMethodsList() {
 }
 
 /**
- * 載入歷史店家清單供 datalist 與快速挑選使用
+ * 載入店家清單與常用店家清單供 datalist、快速挑選與常用標籤使用
  */
 async function loadDistinctMerchants() {
   try {
-    const list = await getDistinctMerchants();
+    const [list, preferred] = await Promise.all([
+      getDistinctMerchants(),
+      getPreferredMerchants(),
+    ]);
     distinctMerchants.value = Array.isArray(list) ? list : [];
+    preferredMerchants.value = Array.isArray(preferred) ? preferred : [];
     merchantOptions.value = distinctMerchants.value.map((m) => ({
       name: m,
       raw: m,
     }));
   } catch {
     distinctMerchants.value = [];
+    preferredMerchants.value = [];
     merchantOptions.value = [];
   }
+}
+
+/**
+ * 點選常用店家快速標籤按鈕，填入店家名稱
+ *
+ * @param name - 常用店家名稱
+ */
+function applyPreferredMerchant(name: string) {
+  merchant.value = name;
 }
 
 onMounted(async () => {
@@ -953,6 +971,16 @@ async function handleSaveExpense() {
   // 即時快取常買商品
   cacheMerchantItems(record.merchant, record.items);
 
+  // 若為新店家，自動寫入店家設定表（不自動設為常用），並重新整理清單
+  if (record.merchant && !distinctMerchants.value.includes(record.merchant)) {
+    try {
+      await addMerchant(record.merchant);
+    } catch {
+      // 已存在則忽略
+    }
+    await loadDistinctMerchants();
+  }
+
   if (isEditMode.value && props.editData?.id) {
     await updateExpense(props.editData.id, record);
     emit('saved', { ...record, id: props.editData.id });
@@ -1053,6 +1081,29 @@ async function handleSaveExpense() {
         <datalist id="merchant-options-list">
           <option v-for="m in distinctMerchants" :key="m" :value="m" />
         </datalist>
+      </div>
+
+      <!-- 常用店家快速標籤列（僅於設定頁有標記 ★ 店家時顯示） -->
+      <div
+        v-if="preferredMerchants.length > 0"
+        id="preferred-merchants-list"
+        class="col-span-2 flex flex-wrap gap-1 items-center"
+      >
+        <span class="text-[11px] text-slate-400">常用店家：</span>
+        <button
+          v-for="m in preferredMerchants"
+          :key="m"
+          type="button"
+          :class="
+            merchant.trim() === m
+              ? 'bg-teal-600 text-white border-teal-600'
+              : 'bg-teal-50 text-teal-700 hover:bg-teal-100 border-teal-200'
+          "
+          class="text-[11px] border px-2 py-0.5 rounded-md transition-colors"
+          @click="applyPreferredMerchant(m)"
+        >
+          {{ m }}
+        </button>
       </div>
     </div>
 

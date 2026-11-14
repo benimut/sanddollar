@@ -50,15 +50,15 @@ describe('Dexie.js 本地資料庫模型與儲存操作 (TrackerDatabase & db se
       expect((db as any).categories).toBeDefined();
     });
 
-    it('全域單例 db 之名稱應為 MobileExpenseTrackerDB 且版本為 5', () => {
+    it('全域單例 db 之名稱應為 MobileExpenseTrackerDB 且版本為 6', () => {
       expect(db.name).toBe('MobileExpenseTrackerDB');
-      expect(db.verno).toBe(5);
+      expect(db.verno).toBe(6);
     });
 
-    it('TrackerDatabase 建構子應支援自訂 dbName 並維持版本 5', () => {
+    it('TrackerDatabase 建構子應支援自訂 dbName 並維持版本 6', () => {
       const customDb = new TrackerDatabase('CustomIsolatedDB');
       expect(customDb.name).toBe('CustomIsolatedDB');
-      expect(customDb.verno).toBe(5);
+      expect(customDb.verno).toBe(6);
       customDb.close();
     });
 
@@ -272,10 +272,16 @@ describe('Dexie.js 本地資料庫模型與儲存操作 (TrackerDatabase & db se
       });
 
       const merchants = await getDistinctMerchants();
-      // 應去重，僅含「7-ELEVEN」與「全家便利商店」
-      expect(merchants.length).toBe(2);
-      expect(merchants).toContain('7-ELEVEN');
-      expect(merchants).toContain('全家便利商店');
+      // 設定表尚未加入店家時回傳空陣列；加入店家後應去重並依自然排序回傳
+      expect(merchants).toEqual([]);
+      await db.merchants.bulkAdd([
+        { name: '7-ELEVEN', isDefault: false },
+        { name: '全家便利商店', isDefault: false },
+      ]);
+      const merchantList = await getDistinctMerchants();
+      expect(merchantList.length).toBe(2);
+      expect(merchantList).toContain('7-ELEVEN');
+      expect(merchantList).toContain('全家便利商店');
     });
 
     it('getItemsByMerchant 應回傳特定店家歷史購買過之商品，並依品名去重且排除純折扣項', async () => {

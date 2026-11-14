@@ -16,6 +16,7 @@ import type {
   PaymentMethodRecord,
   IncomeSourceRecord,
   RewardSourceRecord,
+  MerchantRecord,
 } from '@/types';
 import { sortStringsNaturally, sortByNameNaturally } from '@/utils/sort';
 
@@ -95,6 +96,8 @@ export class TrackerDatabase extends Dexie {
   incomeSources!: Table<IncomeSourceRecord, number>;
   /** 回饋來源表記錄資料表 (支援 name, isDefault 索引) */
   rewardSources!: Table<RewardSourceRecord, number>;
+  /** 店家表記錄資料表 (支援 name, isDefault 索引) */
+  merchants!: Table<MerchantRecord, number>;
 
   /**
    * 初始化 TrackerDatabase 資料庫結構與版本定義
@@ -152,6 +155,21 @@ export class TrackerDatabase extends Dexie {
       }
     });
 
+    // 版本 6 定義：新增店家設定表 (merchants)，並自動遷移既有消費記錄之不重複店家
+    // 注意：常用店家不是必填，可全不設，因此不套用 ensurePreferredInRecords 自動設定預設
+    this.version(6).stores({
+      expenses: '++id, date, merchant, paymentMethod, totalAmount, isForeign',
+      incomes: '++id, date, source, category, amount, isForeign',
+      rewards: '++id, yearMonth, sourceName',
+      categories: '++id, name, type, isDefault, [type+name]',
+      paymentMethods: '++id, name, isDefault',
+      incomeSources: '++id, name, isDefault',
+      rewardSources: '++id, name, isDefault',
+      merchants: '++id, name, isDefault',
+    }).upgrade(async (trans) => {
+      await migrateUniqueField(trans, 'expenses', 'merchant', 'merchants');
+    });
+
     this.setupAutoIncrementReset(this.expenses);
     this.setupAutoIncrementReset(this.incomes);
     this.setupAutoIncrementReset(this.rewards);
@@ -159,6 +177,7 @@ export class TrackerDatabase extends Dexie {
     this.setupAutoIncrementReset(this.paymentMethods);
     this.setupAutoIncrementReset(this.incomeSources);
     this.setupAutoIncrementReset(this.rewardSources);
+    this.setupAutoIncrementReset(this.merchants);
   }
 
   /**
@@ -495,7 +514,7 @@ async function addItemRecord<
   table: Table<T, number>,
   typeLabel: string,
   rawName: string,
-  options?: { defaultFallback?: string; allowFallbackExisting?: boolean }
+  options?: { defaultFallback?: string; allowFallbackExisting?: boolean; autoPreferFirst?: boolean }
 ): Promise<number> {
   const trimmed = typeof rawName === 'string' ? rawName.trim() : '';
   let cleanName = trimmed;
@@ -517,13 +536,16 @@ async function addItemRecord<
       throw new Error(`${typeLabel}「${cleanName}」已存在`);
     }
 
-    const allRecords = await table.toArray();
-    const hasPreferred = allRecords.some((r) => r.isPreferred === true);
+    let shouldPrefer = false;
+    if (options?.autoPreferFirst !== false) {
+      const allRecords = await table.toArray();
+      shouldPrefer = !allRecords.some((r) => r.isPreferred === true);
+    }
 
     const id = await table.add({
       name: cleanName,
       isDefault: false,
-      isPreferred: !hasPreferred,
+      isPreferred: shouldPrefer,
     } as unknown as T);
     return id as number;
   });
@@ -1002,7 +1024,7 @@ export async function getPreferredRewardSource(): Promise<string> {
 
 /**
  * 清除本地 IndexedDB 所有資料庫資料表內容
- * 包含支出、收入、回饋、分類、支付方式、收入來源與回饋來源，並一併清除商家商品快取
+ * 包含支出、收入、回饋、分類、支付方式、收入來源、回饋來源與店家，並一併清除商家商品快取
  */
 export async function clearAllDatabaseData(): Promise<void> {
   const tables = [
@@ -1013,6 +1035,7 @@ export async function clearAllDatabaseData(): Promise<void> {
     db.paymentMethods,
     db.incomeSources,
     db.rewardSources,
+    db.merchants,
   ].filter(Boolean);
 
   await db.transaction('rw', tables, async () => {
@@ -1023,6 +1046,7 @@ export async function clearAllDatabaseData(): Promise<void> {
     if (db.paymentMethods) await db.paymentMethods.clear();
     if (db.incomeSources) await db.incomeSources.clear();
     if (db.rewardSources) await db.rewardSources.clear();
+    if (db.merchants) await db.merchants.clear();
   });
 
   // 一併清空商家品項記憶體快取
@@ -1030,21 +1054,93 @@ export async function clearAllDatabaseData(): Promise<void> {
 }
 
 /**
- * 取得歷史消費記錄中所有不重複的店家名稱清單
+ * 取得所有店家設定記錄清單
  *
- * @returns 店家名稱字串陣列
+ * @returns 店家記錄陣列（依名稱自然排序）
+ */
+export async function getMerchantRecords(): Promise<MerchantRecord[]> {
+  return db.merchants ? sortByNameNaturally(await db.merchants.toArray()) : [];
+}
+
+/**
+ * 新增店家設定記錄
+ * 具備字串修剪 (trim)、未填空白防呆驗證與防重複 (Deduplication) 機制，且不自動設為常用
+ *
+ * @param name - 店家名稱
+ * @returns 新增記錄之自動遞增 ID
+ * @throws {Error} 當名稱為空或已存在同名店家時拋出錯誤
+ */
+export async function addMerchant(name: string): Promise<number> {
+  return addItemRecord(db.merchants, '店家', name, { autoPreferFirst: false });
+}
+
+/**
+ * 取得店家設定表中所有不重複的店家名稱清單
+ *
+ * @returns 店家名稱字串陣列（依名稱自然排序）
  */
 export async function getDistinctMerchants(): Promise<string[]> {
-  const expenses = await db.expenses.toArray();
-  const merchants = new Set<string>();
+  return db.merchants ? fetchDistinctNames(db.merchants) : [];
+}
 
-  for (const expense of expenses) {
-    if (expense.merchant && expense.merchant.trim() !== '') {
-      merchants.add(expense.merchant.trim());
+/**
+ * 取得所有已標記為預設／常用 (isPreferred === true) 的店家名稱清單
+ *
+ * @returns 常用店家名稱字串陣列（依名稱自然排序）
+ */
+export async function getPreferredMerchants(): Promise<string[]> {
+  if (!db.merchants) return [];
+  const records = await db.merchants.toArray();
+  const names = new Set<string>();
+  for (const r of records) {
+    if (r.isPreferred === true && r.name && r.name.trim() !== '') {
+      names.add(r.name.trim());
     }
   }
+  return sortStringsNaturally(Array.from(names));
+}
 
-  return sortStringsNaturally(Array.from(merchants));
+/**
+ * 更新指定 ID 之店家名稱
+ * 具備字串修剪、防呆驗證、去重檢查與所有歷史消費記錄同步批次更新機制
+ *
+ * @param id - 店家 ID
+ * @param name - 新店家名稱
+ * @returns 受影響之筆數 (1 為成功，0 為記錄不存在)
+ * @throws {Error} 當名稱為空或已存在同名店家時拋出錯誤
+ */
+export async function updateMerchant(id: number, name: string): Promise<number> {
+  return updateItemAndSyncHistory(
+    db.merchants,
+    db.expenses,
+    'merchant',
+    '店家',
+    id,
+    name
+  );
+}
+
+/**
+ * 刪除指定 ID 之店家記錄（不影響既有歷史消費記錄，亦不自動補齊預設）
+ *
+ * @param id - 店家 ID
+ */
+export async function deleteMerchant(id: number): Promise<void> {
+  if (db.merchants) {
+    await db.merchants.delete(id);
+  }
+}
+
+/**
+ * 切換指定 ID 之店家的預設／常用狀態 (多選切換，不影響其他店家)
+ *
+ * @param id - 店家 ID
+ */
+export async function togglePreferredMerchant(id: number): Promise<void> {
+  if (!db.merchants) return;
+  const record = await db.merchants.get(id);
+  if (!record) return;
+  await db.merchants.update(id, { isPreferred: !record.isPreferred });
 }
 
 /**
