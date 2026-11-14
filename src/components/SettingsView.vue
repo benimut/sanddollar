@@ -532,8 +532,7 @@ onMounted(() => {
 
           <!-- 正常瀏覽狀態 -->
           <template v-else>
-            <span class="font-medium text-slate-700">{{ cat.name }}</span>
-            <div class="flex items-center gap-1">
+            <div class="flex items-center gap-1.5">
               <button
                 type="button"
                 class="btn-default-category px-1.5 py-1 rounded-lg transition-colors text-sm leading-none"
@@ -549,6 +548,9 @@ onMounted(() => {
               >
                 {{ effectiveDefaultCategoryId === cat.id ? '★' : '☆' }}
               </button>
+              <span class="font-medium text-slate-700">{{ cat.name }}</span>
+            </div>
+            <div class="flex items-center gap-1">
               <button
                 type="button"
                 class="btn-edit-category px-2 py-1 text-slate-500 hover:text-teal-700 hover:bg-teal-50 rounded-lg transition-colors"

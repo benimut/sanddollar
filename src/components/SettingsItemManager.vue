@@ -194,8 +194,7 @@ function handleSetDefault(id: number) {
 
         <!-- 正常瀏覽狀態 -->
         <template v-else>
-          <span class="font-medium text-slate-700">{{ item.name }}</span>
-          <div class="flex items-center gap-1">
+          <div class="flex items-center gap-1.5">
             <button
               type="button"
               :class="[
@@ -212,6 +211,9 @@ function handleSetDefault(id: number) {
             >
               {{ effectiveDefaultId === item.id ? '★' : '☆' }}
             </button>
+            <span class="font-medium text-slate-700">{{ item.name }}</span>
+          </div>
+          <div class="flex items-center gap-1">
             <button
               type="button"
               :class="`btn-edit-${idPrefix}`"
