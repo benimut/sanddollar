@@ -297,10 +297,14 @@ describe('Milestone 5: TransactionForm 模組化拆分與歷史選單單元測�
         expect(optionValues).toContain('股票股利');
         expect(optionValues).toContain('發票中獎');
 
-        // 選單末尾應提供「+ 新增收入來源...」
+        // 選單末尾應提供「+ 新增收入來源...」，且不應包含「請選擇...」空白選項
+        expect(optionValues).not.toContain('');
         const addNewOpt = options.find((opt) => opt.value === '__add_new__');
         expect(addNewOpt, '選單中應包含 value="__add_new__" 的新增選項').toBeDefined();
         expect(addNewOpt?.textContent).toContain('新增收入來源');
+
+        // 畫面不應顯示「歷史來源：」快速點選按鈕區塊
+        expect(container.textContent).not.toContain('歷史來源：');
       } finally {
         cleanup();
       }
@@ -1584,9 +1588,11 @@ describe('Milestone 5: TransactionForm 模組化拆分與歷史選單單元測�
       await flushAsync();
 
       try {
-        // 1. 驗證存在純下拉選單 #reward-source-select
+        // 1. 驗證存在純下拉選單 #reward-source-select，且不含「請選擇...」空白選項
         const select = container.querySelector('#reward-source-select') as HTMLSelectElement | null;
         expect(select, 'RewardForm 必須提供純下拉選單 #reward-source-select').not.toBeNull();
+        const optionValues = Array.from(select!.querySelectorAll('option')).map((opt) => opt.value);
+        expect(optionValues).not.toContain('');
 
         // 2. 驗證平時不顯示常駐文字輸入框（若有相容元素必須為 hidden）
         const textInput = container.querySelector('#reward-source') as HTMLElement | null;
