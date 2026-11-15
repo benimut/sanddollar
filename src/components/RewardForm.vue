@@ -282,7 +282,6 @@ async function handleSaveReward() {
           class="w-full text-sm border border-slate-200 rounded-lg p-2 bg-white focus:ring-2 focus:ring-teal-500 focus:outline-none"
           @change="handleSourceSelectChange"
         >
-          <option value="">請選擇回饋來源...</option>
           <option v-for="src in distinctRewardSources" :key="src" :value="src">{{ src }}</option>
           <option value="__add_new__">+ 新增回饋來源...</option>
         </select>

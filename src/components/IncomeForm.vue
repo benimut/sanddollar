@@ -261,16 +261,6 @@ async function loadDistinctSources() {
 }
 
 /**
- * 點選歷史來源快速標籤按鈕
- */
-function applySource(sourceName: string) {
-  incomeSource.value = sourceName;
-  selectedSourceOption.value = sourceName;
-  isAddingSource.value = false;
-  customSourceName.value = '';
-}
-
-/**
  * 監聽收入來源選單變更
  */
 function handleSourceSelectChange(e: Event) {
@@ -547,7 +537,6 @@ async function handleSaveIncome() {
           class="w-full text-sm border border-slate-200 rounded-lg p-2 bg-white focus:ring-2 focus:ring-teal-500 focus:outline-none"
           @change="handleSourceSelectChange"
         >
-          <option value="">請選擇收入來源...</option>
           <option v-for="src in distinctSources" :key="src" :value="src">{{ src }}</option>
           <option value="__add_new__">+ 新增收入來源...</option>
         </select>
@@ -579,20 +568,6 @@ async function handleSaveIncome() {
         <datalist id="income-source-list">
           <option v-for="src in distinctSources" :key="src" :value="src">{{ src }}</option>
         </datalist>
-      </div>
-
-      <!-- 快速點選歷史標籤按鈕 -->
-      <div v-if="distinctSources.length > 0" class="mt-1.5 flex flex-wrap gap-1 items-center">
-        <span class="text-[11px] text-slate-400">歷史來源：</span>
-        <button
-          v-for="src in distinctSources"
-          :key="src"
-          type="button"
-          class="text-[11px] bg-teal-50 text-teal-700 hover:bg-teal-100 border border-teal-200 px-2 py-0.5 rounded-md transition-colors"
-          @click="applySource(src)"
-        >
-          {{ src }}
-        </button>
       </div>
     </div>
 
