@@ -9,7 +9,7 @@
  * 3. 非 /api/* 路徑委派予 Workers Static Assets 託管 Vue SPA。
  */
 
-import { GoogleGenAI } from '@google/genai';
+import { GoogleGenAI } from '@google/genai/web';
 
 /** Cloudflare Worker 環境綁定與 Secret 介面 */
 interface Env {
@@ -339,6 +339,64 @@ function buildPromptText(categories: string[]): string {
 }
 
 /**
+ * 安全解析 @google/genai 拋出之錯誤物件，擷取 HTTP 狀態碼與 Google API 錯誤原因（絕不外洩 API Key）
+ */
+function extractSafeGeminiError(err: unknown): { status?: number; summary: string } {
+  if (!err || typeof err !== 'object') {
+    return { summary: String(err || '未知錯誤').slice(0, 200) };
+  }
+
+  const errObj = err as {
+    statusCode?: unknown;
+    status?: unknown;
+    body?: unknown;
+    message?: unknown;
+  };
+
+  const status =
+    typeof errObj.statusCode === 'number'
+      ? errObj.statusCode
+      : typeof errObj.status === 'number'
+        ? errObj.status
+        : undefined;
+
+  let detail = '';
+
+  if (typeof errObj.body === 'string' && errObj.body.trim()) {
+    try {
+      const rawParsed = JSON.parse(errObj.body) as unknown;
+      const parsed = (Array.isArray(rawParsed) ? rawParsed[0] : rawParsed) as {
+        error?: { message?: string; status?: string; code?: number };
+        message?: string;
+      };
+      if (parsed?.error?.message) {
+        const codePart = parsed.error.status ? `${parsed.error.status}: ` : '';
+        detail = `${codePart}${parsed.error.message}`;
+      } else if (parsed?.message) {
+        detail = parsed.message;
+      } else {
+        detail = errObj.body.trim();
+      }
+    } catch {
+      detail = errObj.body.trim();
+    }
+  } else if (errObj.body && typeof errObj.body === 'object') {
+    const bodyObj = errObj.body as { error?: { message?: string; status?: string } };
+    if (bodyObj.error?.message) {
+      detail = bodyObj.error.message;
+    }
+  }
+
+  if (!detail && typeof errObj.message === 'string') {
+    detail = errObj.message;
+  }
+
+  // 防禦性過濾：避免任何類似 Google API Key 字樣外洩到前端訊息
+  const sanitized = detail.replace(/AIza[0-9A-Za-z_-]{20,}/g, '[REDACTED]').slice(0, 240);
+  return { status, summary: sanitized || '未知上游錯誤' };
+}
+
+/**
  * 處理紙本發票辨識 API 請求 (POST /api/parse-invoice)
  */
 async function handleParseInvoice(request: Request, env: Env): Promise<Response> {
@@ -346,7 +404,8 @@ async function handleParseInvoice(request: Request, env: Env): Promise<Response>
     return jsonResponse({ error: '僅支援 POST 請求' }, 405);
   }
 
-  if (!env.GEMINI_API_KEY) {
+  const apiKey = typeof env.GEMINI_API_KEY === 'string' ? env.GEMINI_API_KEY.trim() : '';
+  if (!apiKey) {
     return jsonResponse(
       { error: '伺服器尚未設定 GEMINI_API_KEY，請先於 Cloudflare Worker Secrets 完成設定。' },
       503
@@ -399,7 +458,7 @@ async function handleParseInvoice(request: Request, env: Env): Promise<Response>
   const categories = sanitizeCategories(body.categories);
 
   try {
-    const ai = new GoogleGenAI({ apiKey: env.GEMINI_API_KEY });
+    const ai = new GoogleGenAI({ apiKey });
 
     const interaction = await ai.interactions.create({
       model: GEMINI_MODEL,
@@ -436,13 +495,44 @@ async function handleParseInvoice(request: Request, env: Env): Promise<Response>
     const result = normalizeModelOutput(parsedJson, categories);
     return jsonResponse({ result }, 200);
   } catch (err: unknown) {
-    const detail = err instanceof Error ? err.message : String(err);
-    console.error('[parse-invoice] Gemini API 呼叫失敗:', detail);
+    const { status, summary } = extractSafeGeminiError(err);
+    console.error('[parse-invoice] Gemini API 呼叫失敗:', status ?? 'unknown', summary);
+    const statusLabel = status ? `HTTP ${status}` : '呼叫異常';
     return jsonResponse(
-      { error: '紙本發票辨識服務暫時無法使用，請稍後再試或檢查 API 配額。' },
+      { error: `紙本發票辨識失敗（${statusLabel}）：${summary}` },
       502
     );
   }
+}
+
+/**
+ * 處理 AI 認證檢查與登入導回端點 (GET /api/auth)
+ * 由於位於受 Cloudflare Access 保護之 /api/* 路徑下：
+ * - ?check=1：能到達 Worker 即代表已通過 Access 認證，回傳 200 JSON。
+ * - 一般瀏覽器導向：完成 Cloudflare Access 驗證後安全導回站內頁面（預設首頁 /）。
+ */
+function handleAuthEndpoint(request: Request, url: URL): Response {
+  if (request.method !== 'GET') {
+    return jsonResponse({ error: '僅支援 GET 請求' }, 405);
+  }
+
+  if (url.searchParams.get('check') === '1') {
+    return jsonResponse({ authenticated: true }, 200);
+  }
+
+  const rawReturnTo = url.searchParams.get('returnTo') || '/';
+  // 僅允許站內相對路徑（單一 / 開頭且不為 //），防止 Open Redirect
+  const safeReturnTo =
+    rawReturnTo.startsWith('/') && !rawReturnTo.startsWith('//') ? rawReturnTo : '/';
+  const redirectTarget = new URL(safeReturnTo, url.origin).toString();
+
+  return new Response(null, {
+    status: 302,
+    headers: {
+      Location: redirectTarget,
+      'Cache-Control': 'no-store',
+    },
+  });
 }
 
 export default {
@@ -451,6 +541,10 @@ export default {
    */
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
+
+    if (url.pathname === '/api/auth') {
+      return handleAuthEndpoint(request, url);
+    }
 
     if (url.pathname === '/api/parse-invoice') {
       return handleParseInvoice(request, env);

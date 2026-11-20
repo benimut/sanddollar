@@ -13,7 +13,7 @@
  */
 
 import { ref, onMounted, onUnmounted } from 'vue';
-import { SwitchCamera, RotateCcw, Camera, Crop } from 'lucide-vue-next';
+import { SwitchCamera, RotateCcw, Camera, Crop, ShieldCheck } from 'lucide-vue-next';
 import jsQR from 'jsqr';
 import { parseInvoiceQRCode, type ParsedInvoiceResult } from '@/utils/invoiceParser';
 import ReceiptCropper, { type CroppedImagePayload } from './ReceiptCropper.vue';
@@ -112,6 +112,12 @@ const capturedImageUrl = ref('');
 
 /** 是否正在呼叫後端 Gemini API 辨識紙本發票 */
 const isAnalyzingPaper = ref(false);
+
+/** 紙本發票 AI 認證狀態：unknown 未檢查 / checking 檢查中 / authenticated 已通過 / required 需認證 */
+type PaperAuthState = 'unknown' | 'checking' | 'authenticated' | 'required';
+
+/** 紙本發票 AI 認證狀態 */
+const paperAuthState = ref<PaperAuthState>('unknown');
 
 /** 是否因 Cloudflare Access 登入過期導致 API 驗證失敗 */
 const isAuthExpired = ref(false);
@@ -851,6 +857,62 @@ async function stopScanner() {
 }
 
 /**
+ * 檢查是否已通過 Cloudflare Access 之 /api/* 存取認證
+ * 僅在切入「紙本發票拍照」時執行，確保首頁與電子發票 QR 模式完全免登入。
+ */
+async function checkPaperAuth() {
+  if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+    paperAuthState.value = 'authenticated';
+    errorMessage.value = '目前處於離線狀態，紙本發票 AI 辨識需要網路連線。';
+    return;
+  }
+
+  paperAuthState.value = 'checking';
+  errorMessage.value = '';
+  isAuthExpired.value = false;
+
+  try {
+    const response = await fetch('/api/auth?check=1', {
+      method: 'GET',
+      credentials: 'same-origin',
+      redirect: 'manual',
+      cache: 'no-store',
+    });
+
+    const contentType = response.headers.get('content-type') || '';
+    if (
+      response.type === 'opaqueredirect' ||
+      response.redirected ||
+      response.status === 401 ||
+      response.status === 403 ||
+      (response.status >= 300 && response.status < 400) ||
+      !contentType.toLowerCase().includes('application/json')
+    ) {
+      paperAuthState.value = 'required';
+      return;
+    }
+
+    if (response.ok) {
+      paperAuthState.value = 'authenticated';
+      return;
+    }
+
+    paperAuthState.value = 'required';
+  } catch {
+    // 跨網域 Access 登入重導向在部分瀏覽器會以 TypeError 呈現，視為尚未完成認證
+    paperAuthState.value = 'required';
+  }
+}
+
+/**
+ * 導向同源 /api/auth 觸發 Cloudflare Access 登入認證，完成後自動導回原頁面
+ */
+function handleStartPaperAuth() {
+  const returnTo = `${window.location.pathname}${window.location.search}`;
+  window.location.assign(`/api/auth?returnTo=${encodeURIComponent(returnTo)}`);
+}
+
+/**
  * 切換掃描模式（電子發票 QR Code / 紙本發票拍照辨識）
  * 切換時共用既有相機串流不重開鏡頭，降低延遲與權限干擾。
  */
@@ -872,6 +934,7 @@ function handleSwitchMode(mode: ScanMode) {
     cameraStatus.value = isCameraActive.value
       ? '請將紙本發票置於畫面中，對焦清晰後按下拍照'
       : '';
+    void checkPaperAuth();
   } else {
     paperStep.value = 'camera';
     capturedImageUrl.value = '';
@@ -947,13 +1010,6 @@ function handlePaperRecrop() {
 }
 
 /**
- * 重新整理頁面以完成 Cloudflare Access 登入驗證續期
- */
-function handleReloadForAuth() {
-  window.location.reload();
-}
-
-/**
  * 紙本發票模式：將正矩形裁切並壓縮後之影像送往同源 Worker API 進行 Gemini AI 辨識
  */
 async function handlePaperCropConfirm(payload: CroppedImagePayload) {
@@ -971,6 +1027,7 @@ async function handlePaperCropConfirm(payload: CroppedImagePayload) {
     const response = await fetch('/api/parse-invoice', {
       method: 'POST',
       credentials: 'same-origin',
+      redirect: 'manual',
       headers: {
         'Content-Type': 'application/json',
       },
@@ -983,16 +1040,19 @@ async function handlePaperCropConfirm(payload: CroppedImagePayload) {
 
     const responseContentType = response.headers.get('content-type') || '';
 
-    // 若遭遇 Cloudflare Access 登入過期，可能會收到 401/403 或被重導向至 HTML 登入頁
+    // 若遭遇 Cloudflare Access 未登入或過期，會收到 opaqueredirect、3xx、401/403 或 HTML 登入頁
     if (
+      response.type === 'opaqueredirect' ||
       response.redirected ||
       response.status === 401 ||
       response.status === 403 ||
+      (response.status >= 300 && response.status < 400) ||
       !responseContentType.toLowerCase().includes('application/json')
     ) {
+      paperAuthState.value = 'required';
       isAuthExpired.value = true;
       errorMessage.value =
-        '登入驗證可能已過期，請重新整理頁面完成 Cloudflare Access 驗證後再試。';
+        '尚未完成 Cloudflare 認證或驗證已過期，請點擊下方按鈕前往認證後再試。';
       return;
     }
 
@@ -1209,21 +1269,52 @@ onUnmounted(async () => {
             </button>
           </div>
 
-          <!-- 紙本發票模式：拍照快門按鈕（僅支援即時拍照，不提供相簿上傳） -->
+          <!-- 紙本發票模式：先確認 AI 認證狀態，已認證才顯示拍照快門（不提供相簿上傳） -->
           <div v-else class="space-y-2 pt-1">
-            <button
-              type="button"
-              data-testid="capture-paper-btn"
-              :disabled="!isCameraActive"
-              class="w-full py-2.5 px-4 bg-teal-600 hover:bg-teal-700 active:scale-[0.99] text-white font-bold text-sm rounded-xl shadow-xs transition flex items-center justify-center gap-2 disabled:opacity-50"
-              @click="handleCapturePaperPhoto"
+            <div
+              v-if="paperAuthState === 'checking'"
+              class="w-full py-3 px-4 bg-slate-50 border border-slate-200 rounded-xl text-xs text-slate-600 text-center font-medium"
             >
-              <Camera class="w-4 h-4" />
-              <span>拍照並框選範圍</span>
-            </button>
-            <p class="text-[11px] text-slate-400 text-center">
-              拍照後可先以正矩形裁切發票文字區域，再送交 Gemini AI 辨識（請避開完整卡號等個資）
-            </p>
+              正在確認 AI 辨識認證狀態...
+            </div>
+
+            <div
+              v-else-if="paperAuthState === 'required'"
+              data-testid="paper-auth-prompt"
+              class="p-3.5 bg-teal-50 border border-teal-200 rounded-xl space-y-2.5 text-center"
+            >
+              <div class="flex items-center justify-center gap-1.5 text-xs font-bold text-teal-900">
+                <ShieldCheck class="w-4 h-4 text-teal-600" />
+                <span>啟用 AI 紙本發票辨識前需先完成認證</span>
+              </div>
+              <p class="text-[11px] text-teal-800/80 leading-relaxed">
+                一般記帳與電子發票掃描皆免登入；認證通過後 1 個月內使用紙本發票辨識皆不需重複登入。
+              </p>
+              <button
+                type="button"
+                data-testid="paper-auth-btn"
+                class="w-full py-2.5 px-4 bg-teal-600 hover:bg-teal-700 active:scale-[0.99] text-white font-bold text-xs rounded-xl shadow-xs transition"
+                @click="handleStartPaperAuth"
+              >
+                前往 Cloudflare 認證
+              </button>
+            </div>
+
+            <template v-else>
+              <button
+                type="button"
+                data-testid="capture-paper-btn"
+                :disabled="!isCameraActive"
+                class="w-full py-2.5 px-4 bg-teal-600 hover:bg-teal-700 active:scale-[0.99] text-white font-bold text-sm rounded-xl shadow-xs transition flex items-center justify-center gap-2 disabled:opacity-50"
+                @click="handleCapturePaperPhoto"
+              >
+                <Camera class="w-4 h-4" />
+                <span>拍照並框選範圍</span>
+              </button>
+              <p class="text-[11px] text-slate-400 text-center">
+                拍照後可先以正矩形裁切發票文字區域，再送交 Gemini AI 辨識（請避開完整卡號等個資）
+              </p>
+            </template>
           </div>
 
           <!-- 非發票 QR Code 即時提醒 -->
@@ -1281,9 +1372,9 @@ onUnmounted(async () => {
             v-if="isAuthExpired"
             type="button"
             class="px-2.5 py-1 rounded-md bg-rose-600 text-white font-semibold hover:bg-rose-700"
-            @click="handleReloadForAuth"
+            @click="handleStartPaperAuth"
           >
-            重新整理完成驗證
+            前往 Cloudflare 認證
           </button>
         </div>
 
