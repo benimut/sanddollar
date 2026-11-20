@@ -1,40 +1,24 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { createApp, nextTick, type ComponentPublicInstance } from 'vue';
+import jsQR from 'jsqr';
 import InvoiceScannerModal from '@/components/InvoiceScannerModal.vue';
 import * as dbModule from '@/db';
 import type { ParsedInvoiceResult } from '@/utils/invoiceParser';
 
 /**
- * Milestone 2 (M2): 電子發票掃描彈窗 (InvoiceScannerModal) 動態分類單元測試套件
- * 
+ * 電子發票掃描彈窗 (InvoiceScannerModal) 單元測試套件
+ *
  * 測試範疇：
- * 1. 驗證分類選項動態載入自 DEFAULT_CATEGORIES / getCategories('expense')，不再硬編碼。
- * 2. 驗證掛載時調用 getCategories('expense')，並動態合併自訂分類。
- * 3. 驗證掃描解析後，自訂支出分類出現在品項分類下拉選單中。
- * 4. 驗證使用者選取自訂支出分類後，emit 之 parsed 結果中品項 category 包含使用者選取之自訂分類。
+ * 1. M2 動態支出分類載入與自訂分類選取帶入表單驗證。
+ * 2. 相機高解析度串流啟動、原生 BarcodeDetector 雙碼同步辨識驗證。
+ * 3. 無原生 BarcodeDetector 時自動降級使用 jsQR（含 Big5 二進位資料備援解碼）驗證。
+ * 4. 掃描到非電子發票 QR Code 即時提醒與關閉時相機資源釋放驗證。
  */
 
-// Mock html5-qrcode
-vi.mock('html5-qrcode', () => {
-  class MockHtml5Qrcode {
-    elementId: string;
-    isScanning = false;
-    start = vi.fn().mockResolvedValue(undefined);
-    stop = vi.fn().mockResolvedValue(undefined);
-    clear = vi.fn().mockResolvedValue(undefined);
-
-    constructor(elementId: string) {
-      this.elementId = elementId;
-    }
-  }
-
-  return {
-    Html5Qrcode: MockHtml5Qrcode,
-    Html5QrcodeSupportedFormats: {
-      QR_CODE: 0,
-    },
-  };
-});
+// Mock jsqr
+vi.mock('jsqr', () => ({
+  default: vi.fn().mockReturnValue(null),
+}));
 
 // Mock @/db
 vi.mock('@/db', async (importOriginal) => {
@@ -57,6 +41,70 @@ vi.mock('@/db', async (importOriginal) => {
     }),
   };
 });
+
+/** 建立模擬相機 MediaStream 與軌道控制工具 */
+function createMockCameraStream() {
+  const stopTrack = vi.fn();
+  const applyConstraints = vi.fn().mockResolvedValue(undefined);
+  const mockTrack = {
+    stop: stopTrack,
+    getCapabilities: vi.fn().mockReturnValue({ focusMode: ['continuous'] }),
+    applyConstraints,
+  };
+  const stream = typeof MediaStream !== 'undefined' ? new MediaStream() : ({} as MediaStream);
+  Object.defineProperty(stream, 'getTracks', {
+    value: vi.fn().mockReturnValue([mockTrack]),
+    configurable: true,
+  });
+  Object.defineProperty(stream, 'getVideoTracks', {
+    value: vi.fn().mockReturnValue([mockTrack]),
+    configurable: true,
+  });
+
+  return { stream, stopTrack, applyConstraints };
+}
+
+/** 模擬影片元素具備可解碼之高解析度影格，以及離屏 canvas 2D context */
+function setupVideoAndCanvasMocks(videoWidth = 1920, videoHeight = 1080) {
+  const originalCreateElement = document.createElement.bind(document);
+  const drawImage = vi.fn();
+  const getImageData = vi.fn((_x: number, _y: number, w: number, h: number) => ({
+    data: new Uint8ClampedArray(w * h * 4),
+    width: w,
+    height: h,
+  }));
+
+  const createElementSpy = vi.spyOn(document, 'createElement').mockImplementation(((tagName: string, options?: ElementCreationOptions) => {
+    const el = originalCreateElement(tagName, options);
+    if (tagName.toLowerCase() === 'canvas') {
+      Object.defineProperty(el, 'getContext', {
+        value: vi.fn().mockReturnValue({
+          drawImage,
+          getImageData,
+        }),
+      });
+    }
+    return el;
+  }) as typeof document.createElement);
+
+  const playSpy = vi
+    .spyOn(HTMLMediaElement.prototype, 'play')
+    .mockImplementation(function (this: HTMLVideoElement) {
+      Object.defineProperty(this, 'readyState', { value: 4, configurable: true });
+      Object.defineProperty(this, 'videoWidth', { value: videoWidth, configurable: true });
+      Object.defineProperty(this, 'videoHeight', { value: videoHeight, configurable: true });
+      return Promise.resolve();
+    });
+
+  return {
+    drawImage,
+    getImageData,
+    restore: () => {
+      createElementSpy.mockRestore();
+      playSpy.mockRestore();
+    },
+  };
+}
 
 describe('Milestone 2 (M2): InvoiceScannerModal 分類動態載入驗證套件', () => {
   const BASE_LEFT_77 =
@@ -113,10 +161,21 @@ describe('Milestone 2 (M2): InvoiceScannerModal 分類動態載入驗證套件',
 
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.mocked(jsQR).mockReturnValue(null);
+    delete (window as unknown as { BarcodeDetector?: unknown }).BarcodeDetector;
+
+    // 預設模擬無相機環境以讓手動輸入測試快速降級
+    Object.defineProperty(navigator, 'mediaDevices', {
+      value: {
+        getUserMedia: vi.fn().mockRejectedValue(new Error('No camera in unit test')),
+      },
+      configurable: true,
+    });
   });
 
   afterEach(() => {
     document.body.innerHTML = '';
+    delete (window as unknown as { BarcodeDetector?: unknown }).BarcodeDetector;
   });
 
   it('InvoiceScannerModal 掛載時應調用 getCategories("expense") 載入動態支出分類', async () => {
@@ -222,6 +281,121 @@ describe('Milestone 2 (M2): InvoiceScannerModal 分類動態載入驗證套件',
       expect(firstItem.category, '帶入表單之品項 category 應為使用者選取之動態自訂分類').toBe('毛孩醫療');
     } finally {
       cleanup();
+    }
+  });
+
+  it('支援原生 BarcodeDetector 時，單幀同時偵測到左右雙碼應自動解析並合併全部商品明細，且關閉時釋放相機', async () => {
+    const { stream, stopTrack, applyConstraints } = createMockCameraStream();
+    const getUserMedia = vi.fn().mockResolvedValue(stream);
+    Object.defineProperty(navigator, 'mediaDevices', {
+      value: { getUserMedia },
+      configurable: true,
+    });
+
+    const detectMock = vi.fn().mockResolvedValue([
+      { rawValue: `${BASE_LEFT_77}:**:無糖綠茶:1:35` },
+      { rawValue: '**茶葉蛋:2:14' },
+    ]);
+
+    class MockBarcodeDetector {
+      static getSupportedFormats = vi.fn().mockResolvedValue(['qr_code']);
+      detect = detectMock;
+    }
+    (window as unknown as { BarcodeDetector: unknown }).BarcodeDetector = MockBarcodeDetector;
+
+    const mediaMocks = setupVideoAndCanvasMocks(1920, 1080);
+    const { container, cleanup } = mountModal();
+
+    try {
+      await flushAsyncWork(220);
+
+      // 應以高解析度後置鏡頭請求相機並套用連續自動對焦
+      expect(getUserMedia).toHaveBeenCalledWith(
+        expect.objectContaining({
+          audio: false,
+          video: expect.objectContaining({
+            facingMode: { ideal: 'environment' },
+            width: { ideal: 1920 },
+            height: { ideal: 1080 },
+          }),
+        })
+      );
+      expect(applyConstraints).toHaveBeenCalled();
+
+      // 驗證左右雙碼已自動填入並完成解析合併
+      expect(container.textContent).toContain('AB12345678');
+      expect(container.textContent).toContain('無糖綠茶');
+      expect(container.textContent).toContain('茶葉蛋');
+      expect(container.textContent).toContain('已讀取左、右雙 QR Code 並完成解析');
+    } finally {
+      cleanup();
+      mediaMocks.restore();
+    }
+
+    // 卸載時應停止相機軌道避免鏡頭持續開啟
+    expect(stopTrack).toHaveBeenCalled();
+  });
+
+  it('不支援原生 BarcodeDetector 時，應降級使用 jsQR 並在 Big5 二進位資料下成功解析發票', async () => {
+    const { stream } = createMockCameraStream();
+    Object.defineProperty(navigator, 'mediaDevices', {
+      value: { getUserMedia: vi.fn().mockResolvedValue(stream) },
+      configurable: true,
+    });
+
+    // 模擬 jsQR 掃到 Big5 編碼發票導致 data 為空字串、僅保留 binaryData 的情境
+    const rawInvoiceAscii = `${BASE_LEFT_77}:**:Tea:1:35`;
+    const binaryBytes = Array.from(rawInvoiceAscii, (ch) => ch.charCodeAt(0));
+    vi.mocked(jsQR).mockReturnValue({
+      data: '',
+      binaryData: binaryBytes,
+      chunks: [],
+      version: 9,
+      location: {} as any,
+    });
+
+    const mediaMocks = setupVideoAndCanvasMocks(1280, 720);
+    const { container, cleanup } = mountModal();
+
+    try {
+      await flushAsyncWork(220);
+
+      expect(jsQR).toHaveBeenCalled();
+      expect(container.textContent).toContain('AB12345678');
+      expect(container.textContent).toContain('Tea');
+    } finally {
+      cleanup();
+      mediaMocks.restore();
+    }
+  });
+
+  it('掃描到非電子發票 QR Code 時應於相機區顯示即時提醒且不覆蓋已解析資料', async () => {
+    const { stream } = createMockCameraStream();
+    Object.defineProperty(navigator, 'mediaDevices', {
+      value: { getUserMedia: vi.fn().mockResolvedValue(stream) },
+      configurable: true,
+    });
+
+    vi.mocked(jsQR).mockReturnValue({
+      data: 'https://example.com/promo',
+      binaryData: [],
+      chunks: [],
+      version: 4,
+      location: {} as any,
+    });
+
+    const mediaMocks = setupVideoAndCanvasMocks(1280, 720);
+    const { container, cleanup } = mountModal();
+
+    try {
+      await flushAsyncWork(220);
+
+      expect(container.textContent).toContain('偵測到非電子發票 QR Code');
+      const leftQrInput = container.querySelector('#left-qr') as HTMLTextAreaElement;
+      expect(leftQrInput.value).toBe('');
+    } finally {
+      cleanup();
+      mediaMocks.restore();
     }
   });
 });
