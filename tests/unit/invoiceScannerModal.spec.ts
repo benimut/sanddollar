@@ -2,18 +2,17 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { createApp, nextTick, type ComponentPublicInstance } from 'vue';
 import jsQR from 'jsqr';
 import InvoiceScannerModal from '@/components/InvoiceScannerModal.vue';
-import * as dbModule from '@/db';
 import type { ParsedInvoiceResult } from '@/utils/invoiceParser';
 
 /**
  * 電子發票掃描彈窗 (InvoiceScannerModal) 單元測試套件
  *
  * 測試範疇：
- * 1. M2 動態支出分類載入與自訂分類選取帶入表單驗證。
- * 2. 相機階梯式高解析度串流啟動、原生 BarcodeDetector 直接讀取原始 video 雙碼同步辨識。
- * 3. 無原生 BarcodeDetector 時自動降級使用 1:1 可視中央 ROI 搭配 jsQR（含 Big5 二進位備援解碼）。
- * 4. 多鏡頭切換與偏好記憶、硬體變焦獨立套用、點擊重新對焦（Tap-to-Focus）與診斷列顯示驗證。
- * 5. 掃描到非電子發票 QR Code 即時提醒與關閉時相機資源釋放驗證。
+ * 1. 掃描彈窗介面精簡契約：無分類選單、無手動輸入框、無「解析發票」按鈕、完整顯示預覽畫面（object-contain）。
+ * 2. 原生 BarcodeDetector 雙碼同步辨識、雙碼完成自動暫停、成功掃碼才記憶偏好鏡頭與一鍵無阻擋帶入表單（品項 category 清空）。
+ * 3. 智慧自動選鏡：預設鏡頭無自動對焦能力時自動靜默切換其他後置鏡頭。
+ * 4. 多後置鏡頭角落圖示切換按鈕與重新掃描功能驗證。
+ * 5. 無原生 BarcodeDetector 時自動降級 jsQR（含 Big5 二進位備援解碼）與非發票 QR Code 即時提醒驗證。
  */
 
 // Mock jsqr
@@ -21,33 +20,10 @@ vi.mock('jsqr', () => ({
   default: vi.fn().mockReturnValue(null),
 }));
 
-// Mock @/db
-vi.mock('@/db', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('@/db')>();
-  return {
-    ...actual,
-    getCategories: vi.fn().mockImplementation((type?: 'expense' | 'income') => {
-      const defaultCats = [
-        { id: 1, name: '餐飲', type: 'expense', isDefault: true },
-        { id: 2, name: '交通', type: 'expense', isDefault: true },
-        { id: 3, name: '生活', type: 'expense', isDefault: true },
-        { id: 4, name: '娛樂', type: 'expense', isDefault: true },
-        { id: 5, name: '醫療', type: 'expense', isDefault: true },
-        { id: 6, name: '其他', type: 'expense', isDefault: true },
-        { id: 99, name: '毛孩醫療', type: 'expense', isDefault: false },
-        { id: 100, name: '攝影器材', type: 'expense', isDefault: false },
-      ];
-      if (!type) return Promise.resolve(defaultCats);
-      return Promise.resolve(defaultCats.filter((c) => c.type === type));
-    }),
-  };
-});
-
 interface MockStreamOptions {
   deviceId?: string;
   label?: string;
   focusModes?: string[];
-  zoom?: { min: number; max: number; step: number } | null;
 }
 
 /** 建立模擬相機 MediaStream 與軌道控制工具 */
@@ -56,35 +32,20 @@ function createMockCameraStream(options: MockStreamOptions = {}) {
     deviceId = 'cam-back-0',
     label = 'camera2 0, facing back',
     focusModes = ['continuous', 'single-shot'],
-    zoom = { min: 1, max: 5, step: 0.1 },
   } = options;
 
-  let appliedZoom: number | undefined = zoom ? zoom.min : undefined;
-  let appliedFocusMode: string | undefined = focusModes[0];
-
   const stopTrack = vi.fn();
-  const applyConstraints = vi.fn().mockImplementation(async (constraints: { advanced?: Array<{ focusMode?: string; zoom?: number }> }) => {
-    const adv = constraints?.advanced?.[0];
-    if (adv?.focusMode) {
-      appliedFocusMode = adv.focusMode;
-    }
-    if (typeof adv?.zoom === 'number') {
-      appliedZoom = adv.zoom;
-    }
-  });
+  const applyConstraints = vi.fn().mockResolvedValue(undefined);
 
   const mockTrack = {
     label,
     stop: stopTrack,
     getCapabilities: vi.fn().mockReturnValue({
       focusMode: focusModes,
-      ...(zoom ? { zoom } : {}),
     }),
-    getSettings: vi.fn().mockImplementation(() => ({
+    getSettings: vi.fn().mockReturnValue({
       deviceId,
-      focusMode: appliedFocusMode,
-      ...(typeof appliedZoom === 'number' ? { zoom: appliedZoom } : {}),
-    })),
+    }),
     applyConstraints,
   };
 
@@ -102,12 +63,7 @@ function createMockCameraStream(options: MockStreamOptions = {}) {
 }
 
 /** 模擬影片元素具備可解碼之高解析度影格，以及離屏 canvas 2D context */
-function setupVideoAndCanvasMocks(
-  videoWidth = 1920,
-  videoHeight = 1080,
-  clientWidth = 320,
-  clientHeight = 240
-) {
+function setupVideoAndCanvasMocks(videoWidth = 1920, videoHeight = 1080) {
   const originalCreateElement = document.createElement.bind(document);
   const drawImage = vi.fn();
   const getImageData = vi.fn((_x: number, _y: number, w: number, h: number) => ({
@@ -135,8 +91,6 @@ function setupVideoAndCanvasMocks(
       Object.defineProperty(this, 'readyState', { value: 4, configurable: true });
       Object.defineProperty(this, 'videoWidth', { value: videoWidth, configurable: true });
       Object.defineProperty(this, 'videoHeight', { value: videoHeight, configurable: true });
-      Object.defineProperty(this, 'clientWidth', { value: clientWidth, configurable: true });
-      Object.defineProperty(this, 'clientHeight', { value: clientHeight, configurable: true });
       return Promise.resolve();
     });
 
@@ -150,7 +104,7 @@ function setupVideoAndCanvasMocks(
   };
 }
 
-describe('Milestone 2 (M2): InvoiceScannerModal 分類動態載入與相機掃描驗證套件', () => {
+describe('InvoiceScannerModal 電子發票相機掃描驗證套件', () => {
   const BASE_LEFT_77 =
     'AB1234567811305208888000000C8000000C80000000012345678012345678901234567890123';
 
@@ -226,7 +180,6 @@ describe('Milestone 2 (M2): InvoiceScannerModal 分類動態載入與相機掃�
     vi.mocked(jsQR).mockReturnValue(null);
     delete (window as unknown as { BarcodeDetector?: unknown }).BarcodeDetector;
 
-    // 預設模擬無相機環境以讓手動輸入測試快速降級
     Object.defineProperty(navigator, 'mediaDevices', {
       value: {
         getUserMedia: vi.fn().mockRejectedValue(new Error('No camera in unit test')),
@@ -242,114 +195,29 @@ describe('Milestone 2 (M2): InvoiceScannerModal 分類動態載入與相機掃�
     delete (window as unknown as { BarcodeDetector?: unknown }).BarcodeDetector;
   });
 
-  it('InvoiceScannerModal 掛載時應調用 getCategories("expense") 載入動態支出分類', async () => {
-    const { cleanup } = mountModal();
-    await flushAsyncWork();
-
-    try {
-      expect(dbModule.getCategories, '掛載時應調用 getCategories("expense") 讀取支出分類').toHaveBeenCalledWith('expense');
-    } finally {
-      cleanup();
-    }
-  });
-
-  it('發票品項分類選單應動態載入資料庫自訂支出分類（如毛孩醫療、攝影器材），不再為靜態硬編碼', async () => {
-    vi.mocked(dbModule.getCategories).mockResolvedValueOnce([
-      { id: 1, name: '餐飲', type: 'expense', isDefault: true },
-      { id: 2, name: '交通', type: 'expense', isDefault: true },
-      { id: 3, name: '生活', type: 'expense', isDefault: true },
-      { id: 4, name: '娛樂', type: 'expense', isDefault: true },
-      { id: 5, name: '醫療', type: 'expense', isDefault: true },
-      { id: 6, name: '其他', type: 'expense', isDefault: true },
-      { id: 99, name: '毛孩醫療', type: 'expense', isDefault: false },
-      { id: 100, name: '攝影器材', type: 'expense', isDefault: false },
-    ]);
-
+  it('掃描彈窗應採純相機介面（無手動輸入框、無「解析發票」按鈕、無分類下拉選單且完整顯示相機畫面）', async () => {
     const { container, cleanup } = mountModal();
     await flushAsyncWork();
 
     try {
-      // 模擬在手動雙碼區輸入左碼發票資料並解析
-      const leftQrInput = container.querySelector('#left-qr') as HTMLTextAreaElement;
-      expect(leftQrInput, '應存在 #left-qr 輸入框').not.toBeNull();
-      leftQrInput.value = `${BASE_LEFT_77}:**:寵物罐頭:2:200`;
-      leftQrInput.dispatchEvent(new Event('input'));
-      await flushAsyncWork();
+      expect(container.querySelector('#left-qr'), '應已移除左側手動輸入框').toBeNull();
+      expect(container.querySelector('#right-qr'), '應已移除右側手動輸入框').toBeNull();
+      expect(container.querySelector('select'), '掃描階段不應出現分類下拉選單').toBeNull();
+      expect(container.textContent, '底部操作列不應包含「解析發票」按鈕').not.toContain('解析發票');
 
-      const parseBtn = Array.from(container.querySelectorAll('button')).find((b) =>
-        b.textContent?.includes('解析發票')
-      );
-      expect(parseBtn, '應存在「解析發票」按鈕').not.toBeNull();
-      (parseBtn as HTMLButtonElement).click();
-      await flushAsyncWork();
-
-      // 檢查品項分類下拉選單
-      const categorySelect = container.querySelector('select');
-      expect(categorySelect, '解析成功後應出現品項分類下拉選單').not.toBeNull();
-
-      const options = Array.from(categorySelect?.querySelectorAll('option') || []).map(
-        (opt) => opt.value || opt.textContent?.trim()
-      );
-
-      // 驗證選項中包含動態載入的自訂分類
-      expect(options, '分類選項應包含動態載入的自訂分類「毛孩醫療」').toContain('毛孩醫療');
-      expect(options, '分類選項應包含動態載入的自訂分類「攝影器材」').toContain('攝影器材');
-      expect(options, '分類選項仍應包含預設分類「餐飲」').toContain('餐飲');
-      expect(options, '分類選項仍應包含預設分類「其他」').toContain('其他');
+      const videoEl = container.querySelector('video');
+      expect(videoEl, '應存在相機預覽 video 元素').not.toBeNull();
+      expect(videoEl?.className, '相機預覽應採 object-contain 完整顯示不裁切').toContain('object-contain');
     } finally {
       cleanup();
     }
   });
 
-  it('使用者選取動態自訂分類後點擊帶入表單，emitted parsed 結果中品項 category 應為自訂分類', async () => {
-    vi.mocked(dbModule.getCategories).mockResolvedValueOnce([
-      { id: 1, name: '餐飲', type: 'expense', isDefault: true },
-      { id: 2, name: '交通', type: 'expense', isDefault: true },
-      { id: 99, name: '毛孩醫療', type: 'expense', isDefault: false },
-    ]);
-
-    const { container, emittedEvents, cleanup } = mountModal();
-    await flushAsyncWork();
-
-    try {
-      const leftQrInput = container.querySelector('#left-qr') as HTMLTextAreaElement;
-      leftQrInput.value = `${BASE_LEFT_77}:**:寵物疫苗針劑:1:800`;
-      leftQrInput.dispatchEvent(new Event('input'));
-      await flushAsyncWork();
-
-      const parseBtn = Array.from(container.querySelectorAll('button')).find((b) =>
-        b.textContent?.includes('解析發票')
-      );
-      (parseBtn as HTMLButtonElement).click();
-      await flushAsyncWork();
-
-      const categorySelect = container.querySelector('select') as HTMLSelectElement;
-      expect(categorySelect).not.toBeNull();
-
-      // 選取自訂分類「毛孩醫療」
-      categorySelect.value = '毛孩醫療';
-      categorySelect.dispatchEvent(new Event('change'));
-      await flushAsyncWork();
-
-      // 點擊「帶入表單」
-      const importBtn = Array.from(container.querySelectorAll('button')).find((b) =>
-        b.textContent?.includes('帶入表單')
-      );
-      expect(importBtn, '應存在「帶入表單」按鈕').not.toBeNull();
-      (importBtn as HTMLButtonElement).click();
-      await flushAsyncWork();
-
-      // 驗證 emit 結果
-      expect(emittedEvents.parsed.length, '應觸發 parsed 事件').toBe(1);
-      const firstItem = emittedEvents.parsed[0].items[0];
-      expect(firstItem.category, '帶入表單之品項 category 應為使用者選取之動態自訂分類').toBe('毛孩醫療');
-    } finally {
-      cleanup();
-    }
-  });
-
-  it('支援原生 BarcodeDetector 時，直接掃描原始 video 同步解析左右雙碼、獨立套用對焦與變焦並顯示診斷列', async () => {
-    const { stream, stopTrack, applyConstraints } = createMockCameraStream();
+  it('支援原生 BarcodeDetector 時，同步解析左右雙碼、成功掃碼記憶偏好鏡頭並可直接無阻擋帶入表單', async () => {
+    const { stream, stopTrack, applyConstraints } = createMockCameraStream({
+      deviceId: 'cam-back-0',
+      label: 'camera2 0, facing back',
+    });
     const getUserMedia = vi.fn().mockResolvedValue(stream);
     Object.defineProperty(navigator, 'mediaDevices', {
       value: {
@@ -373,12 +241,12 @@ describe('Milestone 2 (M2): InvoiceScannerModal 分類動態載入與相機掃�
     (window as unknown as { BarcodeDetector: unknown }).BarcodeDetector = MockBarcodeDetector;
 
     const mediaMocks = setupVideoAndCanvasMocks(1920, 1080);
-    const { container, cleanup } = mountModal();
+    const { container, emittedEvents, cleanup } = mountModal();
 
     try {
-      await flushAsyncWork(220);
+      // 等待開流穩定延遲 (250ms) + 首次掃描
+      await flushAsyncWork(360);
 
-      // 應以高解析度後置鏡頭請求相機
       expect(getUserMedia).toHaveBeenCalledWith(
         expect.objectContaining({
           audio: false,
@@ -390,86 +258,102 @@ describe('Milestone 2 (M2): InvoiceScannerModal 分類動態載入與相機掃�
         })
       );
 
-      // 對焦與變焦應分開獨立呼叫 applyConstraints，避免單項不支援連帶失效
+      // 應套用連續自動對焦且不再強制套用變焦
       expect(applyConstraints).toHaveBeenCalledWith({
         advanced: [{ focusMode: 'continuous' }],
       });
-      expect(applyConstraints).toHaveBeenCalledWith({
-        advanced: [{ zoom: 1.8 }],
-      });
+      expect(applyConstraints).not.toHaveBeenCalledWith(
+        expect.objectContaining({
+          advanced: expect.arrayContaining([expect.objectContaining({ zoom: expect.anything() })]),
+        })
+      );
 
-      // 原生 BarcodeDetector 應直接收到 HTMLVideoElement 而非縮圖 canvas
+      // 原生 BarcodeDetector 應直接讀取完整原始 video
       expect(detectMock).toHaveBeenCalled();
       expect(detectMock.mock.calls[0][0]).toBeInstanceOf(HTMLVideoElement);
 
-      // 驗證診斷列顯示實際解析度、鏡頭名稱、倍率、對焦與引擎
-      const diagBar = container.querySelector('[data-testid="camera-diagnostics"]');
-      expect(diagBar?.textContent).toContain('1920×1080');
-      expect(diagBar?.textContent).toContain('camera2 0, facing back');
-      expect(diagBar?.textContent).toContain('1.8x');
-      expect(diagBar?.textContent).toContain('Native+ROI');
+      // 成功掃出有效發票後才記憶偏好鏡頭
+      expect(window.localStorage.getItem('sanddollar_invoice_scanner_verified_camera_id')).toBe('cam-back-0');
 
-      // 驗證左右雙碼已自動填入並完成解析合併
+      // 驗證預覽結果與無分類下拉選單
       expect(container.textContent).toContain('AB12345678');
       expect(container.textContent).toContain('無糖綠茶');
       expect(container.textContent).toContain('茶葉蛋');
-      expect(container.textContent).toContain('已讀取左、右雙 QR Code 並完成解析');
+      expect(container.querySelector('select')).toBeNull();
+
+      // 直接點擊「帶入表單」不因無分類而阻塞
+      const importBtn = Array.from(container.querySelectorAll('button')).find((b) =>
+        b.textContent?.includes('帶入表單')
+      );
+      expect(importBtn, '應顯示「帶入表單」按鈕').not.toBeNull();
+      (importBtn as HTMLButtonElement).click();
+      await flushAsyncWork();
+
+      expect(emittedEvents.parsed.length, '應直接觸發 parsed 事件帶入表單').toBe(1);
+      expect(emittedEvents.parsed[0].items).toHaveLength(2);
+      expect(emittedEvents.parsed[0].items[0].category, '掃描端應清空分類交由表單處理').toBe('');
+      expect(emittedEvents.close.length, '帶入後應關閉彈窗').toBe(1);
     } finally {
       cleanup();
       mediaMocks.restore();
     }
 
-    // 卸載時應停止相機軌道避免鏡頭持續開啟
     expect(stopTrack).toHaveBeenCalled();
   });
 
-  it('不支援原生 BarcodeDetector 時，應對 object-cover 可視中央區進行 1:1 ROI 裁切並透過 jsQR（含 Big5 二進位備援）解析發票', async () => {
-    const { stream } = createMockCameraStream({ zoom: null });
+  it('預設開啟的後置鏡頭無自動對焦能力時，應自動靜默切換至支援自動對焦的其他後置鏡頭', async () => {
+    const fixedFocusCam = createMockCameraStream({
+      deviceId: 'cam-back-fixed',
+      label: 'camera2 2, facing back',
+      focusModes: [],
+    });
+    const autoFocusCam = createMockCameraStream({
+      deviceId: 'cam-back-af',
+      label: 'camera2 0, facing back',
+      focusModes: ['continuous', 'single-shot'],
+    });
+
+    const getUserMedia = vi
+      .fn()
+      .mockResolvedValueOnce(fixedFocusCam.stream)
+      .mockResolvedValueOnce(autoFocusCam.stream);
+
     Object.defineProperty(navigator, 'mediaDevices', {
       value: {
-        getUserMedia: vi.fn().mockResolvedValue(stream),
-        enumerateDevices: vi.fn().mockResolvedValue([]),
+        getUserMedia,
+        enumerateDevices: vi.fn().mockResolvedValue([
+          { kind: 'videoinput', deviceId: 'cam-back-fixed', label: 'camera2 2, facing back' },
+          { kind: 'videoinput', deviceId: 'cam-front-1', label: 'camera2 1, facing front' },
+          { kind: 'videoinput', deviceId: 'cam-back-af', label: 'camera2 0, facing back' },
+        ]),
       },
       configurable: true,
     });
 
-    // 模擬 jsQR 掃到 Big5 編碼發票導致 data 為空字串、僅保留 binaryData 的情境
-    const rawInvoiceAscii = `${BASE_LEFT_77}:**:Tea:1:35`;
-    const binaryBytes = Array.from(rawInvoiceAscii, (ch) => ch.charCodeAt(0));
-    vi.mocked(jsQR).mockReturnValue({
-      data: '',
-      binaryData: binaryBytes,
-      chunks: [],
-      version: 9,
-      location: {} as any,
-    });
-
-    // 模擬手機直向 1080×1920 視訊透過 object-cover 呈現於 320×240 (4:3) 容器
-    const mediaMocks = setupVideoAndCanvasMocks(1080, 1920, 320, 240);
-    const { container, cleanup } = mountModal();
+    const mediaMocks = setupVideoAndCanvasMocks(1920, 1080);
+    const { cleanup } = mountModal();
 
     try {
-      await flushAsyncWork(220);
+      await flushAsyncWork(100);
 
-      expect(jsQR).toHaveBeenCalled();
-      expect(mediaMocks.drawImage).toHaveBeenCalled();
-
-      // 驗證 drawImage 裁切的是中央可視區且為 1:1 原始像素（來源寬高與目標寬高一致，且排除上下被 object-cover 截掉的區域）
-      const [, sx, sy, sw, sh, , , dw, dh] = mediaMocks.drawImage.mock.calls[0];
-      expect(sy, '應避開被 object-cover 裁切的頂部區域').toBeGreaterThan(500);
-      expect(sh, 'ROI 高度應小於影片總高，聚焦可視對準區').toBeLessThan(810);
-      expect(sw, '來源寬度應與目標畫布寬度維持 1:1 無縮放').toBe(dw);
-      expect(sh, '來源高度應與目標畫布高度維持 1:1 無縮放').toBe(dh);
-
-      expect(container.textContent).toContain('AB12345678');
-      expect(container.textContent).toContain('Tea');
+      expect(fixedFocusCam.stopTrack, '應釋放無自動對焦的鏡頭軌道').toHaveBeenCalled();
+      expect(getUserMedia).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          video: expect.objectContaining({
+            deviceId: { exact: 'cam-back-af' },
+          }),
+        })
+      );
+      expect(autoFocusCam.applyConstraints).toHaveBeenCalledWith({
+        advanced: [{ focusMode: 'continuous' }],
+      });
     } finally {
       cleanup();
       mediaMocks.restore();
     }
   });
 
-  it('偵測到多顆後置鏡頭時，支援切換鏡頭並記憶偏好 deviceId，且支援變焦切換與點擊重新對焦', async () => {
+  it('偵測到多顆後置鏡頭時，角落顯示圖示切換按鈕且未掃出發票前不污染偏好鏡頭記憶', async () => {
     const firstCam = createMockCameraStream({
       deviceId: 'cam-back-0',
       label: 'camera2 0, facing back',
@@ -491,7 +375,6 @@ describe('Milestone 2 (M2): InvoiceScannerModal 分類動態載入與相機掃�
           { kind: 'videoinput', deviceId: 'cam-back-0', label: 'camera2 0, facing back' },
           { kind: 'videoinput', deviceId: 'cam-front-1', label: 'camera2 1, facing front' },
           { kind: 'videoinput', deviceId: 'cam-back-2', label: 'camera2 2, facing back' },
-          { kind: 'videoinput', deviceId: 'cam-back-4', label: 'camera2 4, facing back' },
         ]),
       },
       configurable: true,
@@ -503,34 +386,18 @@ describe('Milestone 2 (M2): InvoiceScannerModal 分類動態載入與相機掃�
     try {
       await flushAsyncWork(80);
 
-      // 應僅列舉 3 顆後置鏡頭（排除前鏡頭）並顯示切換按鈕
+      // 應顯示極簡圖示按鈕（不含長文字）且無診斷灰框或變焦按鈕
       const switchBtn = container.querySelector('[data-testid="switch-camera-btn"]') as HTMLButtonElement;
-      expect(switchBtn, '多後置鏡頭時應顯示切換鏡頭按鈕').not.toBeNull();
-      expect(switchBtn.textContent).toContain('1/3');
+      expect(switchBtn, '多後置鏡頭時應顯示角落圖示切換按鈕').not.toBeNull();
+      expect(switchBtn.getAttribute('aria-label')).toBe('切換鏡頭');
+      expect(switchBtn.textContent?.trim(), '切換按鈕應為純圖示以減少空間占用').toBe('');
+      expect(container.querySelector('[data-testid="camera-diagnostics"]')).toBeNull();
+      expect(container.querySelector('[data-testid="zoom-btn"]')).toBeNull();
 
-      // 測試切換 2x 變焦倍率
-      const zoomButtons = Array.from(container.querySelectorAll('[data-testid="zoom-btn"]')) as HTMLButtonElement[];
-      const zoom2xBtn = zoomButtons.find((btn) => btn.textContent?.trim() === '2x');
-      expect(zoom2xBtn, '應顯示 2x 快速倍率按鈕').not.toBeNull();
-      zoom2xBtn!.click();
-      await flushAsyncWork(30);
-      expect(firstCam.applyConstraints).toHaveBeenCalledWith({
-        advanced: [{ zoom: 2 }],
-      });
-
-      // 測試點擊預覽區觸發重新對焦（single-shot -> continuous）
-      const readerEl = container.querySelector('#qr-reader') as HTMLDivElement;
-      readerEl.click();
-      await flushAsyncWork(30);
-      expect(firstCam.applyConstraints).toHaveBeenCalledWith({
-        advanced: [{ focusMode: 'single-shot' }],
-      });
-
-      // 測試切換至下一顆後置鏡頭
       switchBtn.click();
       await flushAsyncWork(80);
 
-      expect(firstCam.stopTrack, '切換鏡頭前應先停止舊鏡頭軌道').toHaveBeenCalled();
+      expect(firstCam.stopTrack).toHaveBeenCalled();
       expect(getUserMedia).toHaveBeenLastCalledWith(
         expect.objectContaining({
           video: expect.objectContaining({
@@ -538,17 +405,60 @@ describe('Milestone 2 (M2): InvoiceScannerModal 分類動態載入與相機掃�
           }),
         })
       );
-      expect(window.localStorage.getItem('sanddollar_invoice_scanner_camera_id')).toBe('cam-back-2');
-      expect(container.querySelector('[data-testid="camera-diagnostics"]')?.textContent).toContain(
-        'camera2 2, facing back'
-      );
+      expect(
+        window.localStorage.getItem('sanddollar_invoice_scanner_verified_camera_id'),
+        '尚未成功掃出有效發票前不應寫入偏好鏡頭'
+      ).toBeNull();
     } finally {
       cleanup();
       mediaMocks.restore();
     }
   });
 
-  it('掃描到非電子發票 QR Code 時應於相機區顯示即時提醒且不覆蓋已解析資料', async () => {
+  it('不支援原生 BarcodeDetector 時，應降級使用 jsQR（含 Big5 二進位備援）解析發票並支援重新掃描', async () => {
+    const { stream } = createMockCameraStream();
+    Object.defineProperty(navigator, 'mediaDevices', {
+      value: {
+        getUserMedia: vi.fn().mockResolvedValue(stream),
+        enumerateDevices: vi.fn().mockResolvedValue([]),
+      },
+      configurable: true,
+    });
+
+    const rawInvoiceAscii = `${BASE_LEFT_77}:**:Tea:1:35`;
+    const binaryBytes = Array.from(rawInvoiceAscii, (ch) => ch.charCodeAt(0));
+    vi.mocked(jsQR).mockReturnValue({
+      data: '',
+      binaryData: binaryBytes,
+      chunks: [],
+      version: 9,
+      location: {} as any,
+    });
+
+    const mediaMocks = setupVideoAndCanvasMocks(1280, 720);
+    const { container, cleanup } = mountModal();
+
+    try {
+      await flushAsyncWork(360);
+
+      expect(jsQR).toHaveBeenCalled();
+      expect(container.textContent).toContain('AB12345678');
+      expect(container.textContent).toContain('Tea');
+
+      // 驗證「重新掃描」會清除現有已讀取發票結果
+      vi.mocked(jsQR).mockReturnValue(null);
+      const rescanBtn = container.querySelector('[data-testid="rescan-btn"]') as HTMLButtonElement;
+      expect(rescanBtn).not.toBeNull();
+      rescanBtn.click();
+      await flushAsyncWork(30);
+      expect(container.textContent).not.toContain('AB12345678');
+    } finally {
+      cleanup();
+      mediaMocks.restore();
+    }
+  });
+
+  it('掃描到非電子發票 QR Code 時應顯示即時提醒且不出現帶入表單按鈕', async () => {
     const { stream } = createMockCameraStream();
     Object.defineProperty(navigator, 'mediaDevices', {
       value: {
@@ -570,11 +480,13 @@ describe('Milestone 2 (M2): InvoiceScannerModal 分類動態載入與相機掃�
     const { container, cleanup } = mountModal();
 
     try {
-      await flushAsyncWork(220);
+      await flushAsyncWork(360);
 
       expect(container.textContent).toContain('偵測到非電子發票 QR Code');
-      const leftQrInput = container.querySelector('#left-qr') as HTMLTextAreaElement;
-      expect(leftQrInput.value).toBe('');
+      const importBtn = Array.from(container.querySelectorAll('button')).find((b) =>
+        b.textContent?.includes('帶入表單')
+      );
+      expect(importBtn).toBeUndefined();
     } finally {
       cleanup();
       mediaMocks.restore();
