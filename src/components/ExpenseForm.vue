@@ -713,20 +713,28 @@ function removeDiscount(index: number) {
 
 /**
  * 接收發票 QR Code 解析結果並帶入欄位
+ * 分類比照手動新增品項規則：有預設支出分類時自動帶入，無分類時安全留空並於儲存時檢查。
  */
 function handleInvoiceParsed(result: ParsedInvoiceResult) {
+  clearValidationError();
   expenseDate.value = result.date;
   invoiceNumber.value = result.invoiceNumber;
   invoiceRandomCode.value = result.randomCode;
 
   if (result.items && result.items.length > 0) {
-    items.value = result.items.map((it, idx) => ({
-      id: `invoice-item-${idx}-${Date.now()}`,
-      name: it.name,
-      quantity: it.quantity,
-      unitPrice: it.unitPrice,
-      category: it.category || '',
-    }));
+    const fallbackCategory =
+      defaultExpenseCategory.value || expenseCategoryList.value[0] || '';
+    items.value = result.items.map((it, idx) => {
+      const incomingCategory =
+        it.category && it.category !== '未分類' ? it.category : '';
+      return {
+        id: `invoice-item-${idx}-${Date.now()}`,
+        name: it.name,
+        quantity: it.quantity,
+        unitPrice: it.unitPrice,
+        category: incomingCategory || fallbackCategory,
+      };
+    });
   }
 }
 
