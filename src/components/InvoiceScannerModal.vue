@@ -4,13 +4,18 @@
  * @description 電子發票雙 QR Code 相機掃描與逐項分類彈窗元件
  *
  * 核心業務職責：
- * 1. 高解析度相機即時掃描：使用原生 getUserMedia 請求高解析度後置鏡頭與連續自動對焦，卸載或關閉時完整釋放 MediaStream。
- * 2. 雙引擎高密度 QR Code 解碼：優先使用瀏覽器原生 BarcodeDetector（單幀可同時辨識左、右雙碼），不支援或未命中時自動降級使用 jsQR 搭配全圖／左右分區與 Big5 編碼解碼，解決台灣電子發票高密度並排 QR Code 難以辨識的問題。
- * 3. 雙 QR Code 連續辨識與去重：自動區分左側主體碼（77 碼以上發票字軌開頭）與右側明細碼（** 開頭），避免重複掃描覆蓋使用者已選取之分類，並針對非發票 QR Code 提供即時視覺提示。
- * 4. 故障降級手動輸入機制：相機無權限或裝置不支援時，無縫切換為手動文字雙碼輸入作為備用方案。
+ * 1. 高解析度多鏡頭與對焦控制：
+ *    - 透過原生 getUserMedia 階梯式請求高解析度後置鏡頭（1080p -> 720p -> 預設）。
+ *    - 於 video.play() 開流後取得可用鏡頭清單供切換（記憶偏好 deviceId），並分別獨立套用連續對焦、硬體變焦（1x/2x/3x）與點擊預覽區重新對焦（Tap-to-Focus）。
+ *    - 顯示精簡鏡頭診斷列（實際解析度、鏡頭名稱、倍率、對焦模式與解碼引擎）以利實機除錯。
+ * 2. 1:1 可視中央 ROI 與雙引擎解碼：
+ *    - 原生 BarcodeDetector 直接讀取原始解析度 video（連續失敗達門檻才降級，避免首幀偶發例外永久停用）。
+ *    - 依 object-cover 幾何精準換算畫面中央對準框之 1:1 原始像素區（Center ROI）供 jsQR 執行中央與左右分區解碼（含 Big5 二進位備援），消除縮圖糊化、框外雜訊與主執行緒阻塞。
+ * 3. 雙 QR Code 連續辨識與防重複覆蓋：自動區分左側主體碼與右側明細碼（** 開頭），對非發票 QR Code 提供即時提示。
+ * 4. 故障降級手動輸入機制：相機無權限或裝置不支援時，無縫切換為手動文字雙碼輸入。
  */
 
-import { ref, onMounted, onUnmounted } from 'vue';
+import { ref, computed, onMounted, onUnmounted } from 'vue';
 import jsQR from 'jsqr';
 import { parseInvoiceQRCode, type ParsedInvoiceResult } from '@/utils/invoiceParser';
 import { useCategories } from '@/composables/useCategories';
@@ -31,11 +36,59 @@ interface BarcodeDetectorConstructor {
   getSupportedFormats?: () => Promise<string[]>;
 }
 
-/** 解碼畫布最大邊長（保留高密度發票 QR Code 細節並兼顧行動裝置效能） */
-const MAX_DECODE_DIMENSION = 1280;
+/** 鏡頭變焦範圍資訊 */
+interface ZoomRange {
+  min: number;
+  max: number;
+  step: number;
+}
+
+/** 擴充 MediaTrackCapabilities（涵蓋行動瀏覽器對焦與變焦屬性） */
+interface ExtendedTrackCapabilities extends MediaTrackCapabilities {
+  focusMode?: string[];
+  zoom?: ZoomRange;
+}
+
+/** 擴充 MediaTrackSettings（涵蓋行動瀏覽器對焦與變焦設定） */
+interface ExtendedTrackSettings extends MediaTrackSettings {
+  focusMode?: string;
+  zoom?: number;
+}
+
+/** 擴充 MediaTrackConstraintSet（涵蓋行動瀏覽器進階對焦與變焦約束） */
+interface ExtendedTrackConstraintSet extends MediaTrackConstraintSet {
+  focusMode?: string;
+  zoom?: number;
+}
+
+/** 可供切換之相機裝置項目 */
+interface CameraDeviceOption {
+  deviceId: string;
+  label: string;
+}
+
+/** 1:1 原始像素可視裁切區矩形 */
+interface SourceCropRect {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+/** 記憶使用者偏好後置鏡頭 deviceId 之 localStorage 鍵名 */
+const PREFERRED_CAMERA_STORAGE_KEY = 'sanddollar_invoice_scanner_camera_id';
+
+/** 1:1 ROI 單邊安全上限（維持原始像素清晰度，僅在 4K 等極端尺寸下節流） */
+const MAX_ROI_EDGE = 1400;
 
 /** 每幀掃描間隔（毫秒） */
 const SCAN_INTERVAL_MS = 120;
+
+/** 原生 BarcodeDetector 連續失敗幾次後才停用降級 */
+const NATIVE_DETECTOR_MAX_FAILURES = 5;
+
+/** 有原生 BarcodeDetector 時，每隔幾幀才以 jsQR 補救一次（避免阻塞主執行緒與拖慢對焦） */
+const JSQR_ASSIST_INTERVAL_TICKS = 5;
 
 /** 台灣電子發票左側主體碼格式（至少 77 碼且前 10 碼為 2 碼大寫英文 + 8 碼數字） */
 const TAIWAN_INVOICE_LEFT_PREFIX = /^[A-Z]{2}\d{8}/;
@@ -53,6 +106,9 @@ const {
 
 /** 相機即時預覽 video 元素參考 */
 const videoRef = ref<HTMLVideoElement | null>(null);
+
+/** 相機預覽容器參考（用於點擊對焦座標計算） */
+const readerContainerRef = ref<HTMLDivElement | null>(null);
 
 /** 左側 QR Code 字串（含金額、發票號碼等 77 碼以上資訊） */
 const leftCode = ref('');
@@ -78,11 +134,38 @@ const isCameraActive = ref(false);
 /** 解析後之發票結構資料 */
 const parsedResult = ref<ParsedInvoiceResult | null>(null);
 
+/** 可切換的相機裝置清單（優先過濾出後置鏡頭） */
+const availableCameras = ref<CameraDeviceOption[]>([]);
+
+/** 目前使用中的鏡頭 deviceId */
+const currentDeviceId = ref('');
+
+/** 鏡頭硬體變焦範圍（不支援時為 null） */
+const zoomRange = ref<ZoomRange | null>(null);
+
+/** 目前套用之變焦倍率 */
+const currentZoom = ref<number | null>(null);
+
+/** 點擊對焦視覺回饋座標（百分比）與顯示狀態 */
+const focusIndicator = ref<{ x: number; y: number } | null>(null);
+
+/** 實機除錯診斷資訊 */
+const diagnosticResolution = ref('');
+const diagnosticCameraLabel = ref('');
+const diagnosticFocusMode = ref('');
+const diagnosticEngine = ref('');
+
 /** 目前啟用中的相機 MediaStream */
 let mediaStream: MediaStream | null = null;
 
 /** 掃描排程計時器 */
 let scanTimer: ReturnType<typeof setTimeout> | null = null;
+
+/** 點擊對焦回饋隱藏計時器 */
+let focusIndicatorTimer: ReturnType<typeof setTimeout> | null = null;
+
+/** 點擊對焦切回 continuous 計時器 */
+let refocusRestoreTimer: ReturnType<typeof setTimeout> | null = null;
 
 /** 是否處於掃描迴圈運行狀態 */
 let isScanning = false;
@@ -90,15 +173,92 @@ let isScanning = false;
 /** 元件是否已卸載或關閉（避免非同步相機請求回傳後資源洩漏） */
 let isDisposed = false;
 
-/** 複用之離屏解碼畫布與 2D 繪圖環境 */
+/** 防止快速連點切換鏡頭造成並行開流衝突 */
+let isSwitchingCamera = false;
+
+/** 複用之離屏 ROI 解碼畫布與 2D 繪圖環境 */
 let offscreenCanvas: HTMLCanvasElement | null = null;
 let offscreenCtx: CanvasRenderingContext2D | null = null;
 
 /** 瀏覽器原生 BarcodeDetector 實例（不支援時為 null） */
 let barcodeDetector: BarcodeDetectorInstance | null = null;
 
-/** 掃描影格計數（供原生引擎未命中時交替以 jsQR 補救） */
+/** 原生 BarcodeDetector 連續錯誤次數 */
+let nativeDetectorFailCount = 0;
+
+/** 掃描影格計數 */
 let scanTickCount = 0;
+
+/** 目前鏡頭在清單中的索引（1-based，供按鈕與診斷顯示） */
+const currentCameraIndex = computed(() => {
+  if (availableCameras.value.length === 0) return 0;
+  const idx = availableCameras.value.findIndex((cam) => cam.deviceId === currentDeviceId.value);
+  return idx >= 0 ? idx + 1 : 1;
+});
+
+/** 依據硬體支援範圍產生的快捷變焦倍率選項 */
+const zoomPresets = computed<number[]>(() => {
+  if (!zoomRange.value) return [];
+  const { min, max } = zoomRange.value;
+  if (max <= min) return [];
+
+  const candidates = [1, 1.5, 2, 3].filter((v) => v >= min - 0.05 && v <= max + 0.05);
+  const clamped = candidates.map((v) => Number(Math.min(max, Math.max(min, v)).toFixed(1)));
+  const unique = Array.from(new Set(clamped));
+
+  if (unique.length >= 2) {
+    return unique;
+  }
+  return Array.from(new Set([Number(min.toFixed(1)), Number(max.toFixed(1))]));
+});
+
+/** 組合精簡診斷列文字 */
+const diagnosticSummary = computed(() => {
+  const parts: string[] = [];
+  if (diagnosticResolution.value) {
+    parts.push(diagnosticResolution.value);
+  }
+  if (diagnosticCameraLabel.value) {
+    const indexPrefix =
+      availableCameras.value.length > 1 ? `[${currentCameraIndex.value}/${availableCameras.value.length}] ` : '';
+    parts.push(`${indexPrefix}${diagnosticCameraLabel.value}`);
+  }
+  if (currentZoom.value !== null) {
+    parts.push(`${currentZoom.value.toFixed(1)}x`);
+  } else if (isCameraActive.value) {
+    parts.push('無變焦');
+  }
+  if (diagnosticFocusMode.value) {
+    parts.push(`對焦:${diagnosticFocusMode.value}`);
+  }
+  if (diagnosticEngine.value) {
+    parts.push(diagnosticEngine.value);
+  }
+  return parts.join(' · ');
+});
+
+/**
+ * 安全讀取記憶之偏好鏡頭 deviceId
+ */
+function readPreferredCameraId(): string {
+  try {
+    return window.localStorage.getItem(PREFERRED_CAMERA_STORAGE_KEY) || '';
+  } catch {
+    return '';
+  }
+}
+
+/**
+ * 安全寫入偏好鏡頭 deviceId
+ */
+function savePreferredCameraId(deviceId: string) {
+  if (!deviceId) return;
+  try {
+    window.localStorage.setItem(PREFERRED_CAMERA_STORAGE_KEY, deviceId);
+  } catch {
+    // 無痕模式或儲存受限時安全略過
+  }
+}
 
 /**
  * 嘗試初始化瀏覽器原生 BarcodeDetector（僅偵測 qr_code 格式以提升速度與精準度）
@@ -121,6 +281,82 @@ async function initBarcodeDetector(): Promise<BarcodeDetectorInstance | null> {
     return new DetectorCtor({ formats: ['qr_code'] });
   } catch {
     return null;
+  }
+}
+
+/**
+ * 更新診斷列中的影片解析度與軌道狀態資訊
+ */
+function refreshDiagnostics() {
+  const video = videoRef.value;
+  if (video && video.videoWidth > 0 && video.videoHeight > 0) {
+    diagnosticResolution.value = `${video.videoWidth}×${video.videoHeight}`;
+  }
+
+  const videoTrack = mediaStream?.getVideoTracks()[0];
+  if (videoTrack) {
+    const settings = (typeof videoTrack.getSettings === 'function'
+      ? videoTrack.getSettings()
+      : {}) as ExtendedTrackSettings;
+    if (videoTrack.label) {
+      diagnosticCameraLabel.value = videoTrack.label;
+    }
+    if (typeof settings.zoom === 'number' && Number.isFinite(settings.zoom)) {
+      currentZoom.value = Number(settings.zoom.toFixed(1));
+    }
+    if (settings.focusMode) {
+      diagnosticFocusMode.value = settings.focusMode;
+    }
+    if (!diagnosticResolution.value && settings.width && settings.height) {
+      diagnosticResolution.value = `${settings.width}×${settings.height}`;
+    }
+  }
+
+  diagnosticEngine.value = barcodeDetector ? 'Native+ROI' : 'jsQR(1:1 ROI)';
+}
+
+/**
+ * 列舉可用相機清單並優先過濾出後置鏡頭（供多鏡頭手機切換）
+ * 須於取得相機串流授權後呼叫，瀏覽器才會揭露完整裝置標籤與 deviceId。
+ */
+async function refreshAvailableCameras(activeDeviceId?: string) {
+  if (!navigator.mediaDevices || typeof navigator.mediaDevices.enumerateDevices !== 'function') {
+    return;
+  }
+
+  try {
+    const devices = await navigator.mediaDevices.enumerateDevices();
+    const videoInputs = devices.filter((d) => d.kind === 'videoinput' && d.deviceId);
+    if (videoInputs.length === 0) return;
+
+    const backPattern = /back|rear|environment|後|主鏡頭|廣角|望遠|長焦|ultra|tele/i;
+    const frontPattern = /front|user|selfie|前/i;
+
+    const rearInputs = videoInputs.filter(
+      (d) => backPattern.test(d.label) && !frontPattern.test(d.label)
+    );
+    const chosenList = rearInputs.length > 0 ? rearInputs : videoInputs;
+
+    availableCameras.value = chosenList.map((d, idx) => ({
+      deviceId: d.deviceId,
+      label: d.label || `鏡頭 ${idx + 1}`,
+    }));
+
+    if (activeDeviceId) {
+      currentDeviceId.value = activeDeviceId;
+      // 若目前啟用鏡頭未在過濾清單中（例如裝置命名特殊），補入清單確保顯示正確
+      if (!availableCameras.value.some((c) => c.deviceId === activeDeviceId)) {
+        const activeDevice = videoInputs.find((d) => d.deviceId === activeDeviceId);
+        if (activeDevice) {
+          availableCameras.value.unshift({
+            deviceId: activeDevice.deviceId,
+            label: activeDevice.label || '目前鏡頭',
+          });
+        }
+      }
+    }
+  } catch {
+    // 忽略列舉裝置例外，維持現有串流運作
   }
 }
 
@@ -157,10 +393,82 @@ function extractJsQrText(code: ReturnType<typeof jsQR>): string {
 }
 
 /**
- * 使用 jsQR 對高解析度畫布進行全圖與左右分區解碼
+ * 計算 object-cover 視覺預覽中，中央對準框對應至原始 video 的 1:1 像素裁切區（Center ROI）
+ *
+ * @param video - 正在播放相機串流之 HTMLVideoElement
+ * @returns 原始影片像素座標系中的裁切矩形
+ */
+function computeVisibleCenterRoi(video: HTMLVideoElement): SourceCropRect {
+  const vw = video.videoWidth;
+  const vh = video.videoHeight;
+  const cw = video.clientWidth;
+  const ch = video.clientHeight;
+
+  let visX = 0;
+  let visY = 0;
+  let visW = vw;
+  let visH = vh;
+
+  if (cw > 0 && ch > 0) {
+    // 模擬 CSS object-cover 的等比裁切關係，還原使用者在畫面上真正看得到的影片範圍
+    const coverScale = Math.max(cw / vw, ch / vh);
+    visW = Math.min(vw, cw / coverScale);
+    visH = Math.min(vh, ch / coverScale);
+    visX = (vw - visW) / 2;
+    visY = (vh - visH) / 2;
+  }
+
+  // 取可視區域中央（寬 88%、高 76%），精準涵蓋視覺對準框並排除框外一維條碼與桌面背景
+  const roiW = Math.max(16, Math.round(visW * 0.88));
+  const roiH = Math.max(16, Math.round(visH * 0.76));
+  const roiX = Math.max(0, Math.min(vw - roiW, Math.round(visX + (visW - roiW) / 2)));
+  const roiY = Math.max(0, Math.min(vh - roiH, Math.round(visY + (visH - roiH) / 2)));
+
+  return { x: roiX, y: roiY, width: roiW, height: roiH };
+}
+
+/**
+ * 將原始 video 的 1:1 可視中央 ROI 繪製至離屏畫布並回傳畫布尺寸
+ */
+function drawCenterRoiToCanvas(video: HTMLVideoElement): { width: number; height: number } | null {
+  const roi = computeVisibleCenterRoi(video);
+  const maxEdge = Math.max(roi.width, roi.height);
+  // 維持 1:1 原始像素不失真；僅在超過 MAX_ROI_EDGE（例如 4K 串流）時等比節流
+  const scale = maxEdge > MAX_ROI_EDGE ? MAX_ROI_EDGE / maxEdge : 1;
+  const targetWidth = Math.max(16, Math.round(roi.width * scale));
+  const targetHeight = Math.max(16, Math.round(roi.height * scale));
+
+  if (!offscreenCanvas) {
+    offscreenCanvas = document.createElement('canvas');
+    offscreenCtx = offscreenCanvas.getContext('2d', { willReadFrequently: true });
+  }
+  if (!offscreenCtx) return null;
+
+  if (offscreenCanvas.width !== targetWidth || offscreenCanvas.height !== targetHeight) {
+    offscreenCanvas.width = targetWidth;
+    offscreenCanvas.height = targetHeight;
+  }
+
+  offscreenCtx.drawImage(
+    video,
+    roi.x,
+    roi.y,
+    roi.width,
+    roi.height,
+    0,
+    0,
+    targetWidth,
+    targetHeight
+  );
+
+  return { width: targetWidth, height: targetHeight };
+}
+
+/**
+ * 使用 jsQR 對 1:1 可視中央 ROI 畫布進行全框與左右分區解碼
  * 台灣電子發票的左、右兩顆 QR Code 緊鄰並排，分區裁切可避免兩組定位點互相干擾並支援同時讀取雙碼。
  *
- * @param ctx - 已繪製目前相機影格的 2D 畫布環境
+ * @param ctx - 已繪製 1:1 可視 ROI 的 2D 畫布環境
  * @param width - 畫布寬度
  * @param height - 畫布高度
  * @returns 本幀解碼出之不重複字串清單
@@ -171,14 +479,14 @@ function decodeWithJsQr(
   height: number
 ): string[] {
   const results = new Set<string>();
-  const halfOverlapWidth = Math.floor(width * 0.6);
-  const rightStartX = Math.floor(width * 0.4);
+  const leftWidth = Math.floor(width * 0.58);
+  const rightStartX = Math.floor(width * 0.42);
   const rightWidth = width - rightStartX;
 
-  // 依序掃描：全畫面、左半部（對準左碼）、右半部（對準右碼）
+  // 僅針對已對齊視覺對準框之 1:1 ROI 執行中央、左半部、右半部掃描
   const regions = [
     { x: 0, y: 0, w: width, h: height },
-    { x: 0, y: 0, w: halfOverlapWidth, h: height },
+    { x: 0, y: 0, w: leftWidth, h: height },
     { x: rightStartX, y: 0, w: rightWidth, h: height },
   ];
 
@@ -261,49 +569,61 @@ async function scanSingleFrame() {
     return;
   }
 
-  // 依據原始相機解析度計算解碼畫布尺寸（維持高解析度，不壓縮為低畫質縮圖）
-  const srcWidth = video.videoWidth;
-  const srcHeight = video.videoHeight;
-  const maxSide = Math.max(srcWidth, srcHeight);
-  const scale = maxSide > MAX_DECODE_DIMENSION ? MAX_DECODE_DIMENSION / maxSide : 1;
-  const targetWidth = Math.max(1, Math.round(srcWidth * scale));
-  const targetHeight = Math.max(1, Math.round(srcHeight * scale));
-
-  if (!offscreenCanvas) {
-    offscreenCanvas = document.createElement('canvas');
-    offscreenCtx = offscreenCanvas.getContext('2d', { willReadFrequently: true });
-  }
-  if (!offscreenCtx) return;
-
-  if (offscreenCanvas.width !== targetWidth || offscreenCanvas.height !== targetHeight) {
-    offscreenCanvas.width = targetWidth;
-    offscreenCanvas.height = targetHeight;
+  // 首次拿到有效影片尺寸時同步更新診斷資訊
+  if (!diagnosticResolution.value) {
+    refreshDiagnostics();
   }
 
-  offscreenCtx.drawImage(video, 0, 0, targetWidth, targetHeight);
   scanTickCount += 1;
-
   const decodedTexts: string[] = [];
 
-  // 引擎 A：優先使用瀏覽器原生 BarcodeDetector（單幀可同時偵測左、右雙碼）
+  // 引擎 A：原生 BarcodeDetector 直接讀取原始解析度 video，不經縮圖失真
   if (barcodeDetector) {
     try {
-      const barcodes = await barcodeDetector.detect(offscreenCanvas);
+      const barcodes = await barcodeDetector.detect(video);
+      nativeDetectorFailCount = 0;
       for (const barcode of barcodes) {
         if (barcode.rawValue && barcode.rawValue.trim()) {
           decodedTexts.push(barcode.rawValue.trim());
         }
       }
     } catch {
-      // 原生引擎執行失敗時自動停用並降級為 jsQR
-      barcodeDetector = null;
+      nativeDetectorFailCount += 1;
+      if (nativeDetectorFailCount >= NATIVE_DETECTOR_MAX_FAILURES) {
+        // 連續多次失敗才停用原生引擎，避免剛開流偶發例外造成永久失效
+        barcodeDetector = null;
+        refreshDiagnostics();
+      }
     }
   }
 
-  // 引擎 B：若無原生引擎，或原生引擎未命中時交替使用 jsQR 多區域解碼補救
-  if (decodedTexts.length === 0 && (!barcodeDetector || scanTickCount % 2 === 1)) {
-    const jsQrTexts = decodeWithJsQr(offscreenCtx, targetWidth, targetHeight);
-    decodedTexts.push(...jsQrTexts);
+  // 引擎 B：無原生引擎時每幀掃描 1:1 可視 ROI；有原生引擎時低頻補救（避免主執行緒阻塞與拖慢對焦）
+  const shouldRunJsQr =
+    decodedTexts.length === 0 &&
+    (!barcodeDetector || scanTickCount % JSQR_ASSIST_INTERVAL_TICKS === 0);
+
+  if (shouldRunJsQr) {
+    const drawn = drawCenterRoiToCanvas(video);
+    if (drawn && offscreenCtx) {
+      // 若有原生引擎且全畫面未命中，同時再對 1:1 裁切後的 ROI 畫布嘗試一次原生偵測
+      if (barcodeDetector && offscreenCanvas) {
+        try {
+          const roiBarcodes = await barcodeDetector.detect(offscreenCanvas);
+          for (const barcode of roiBarcodes) {
+            if (barcode.rawValue && barcode.rawValue.trim()) {
+              decodedTexts.push(barcode.rawValue.trim());
+            }
+          }
+        } catch {
+          // 略過 ROI 補測例外
+        }
+      }
+
+      if (decodedTexts.length === 0) {
+        const jsQrTexts = decodeWithJsQr(offscreenCtx, drawn.width, drawn.height);
+        decodedTexts.push(...jsQrTexts);
+      }
+    }
   }
 
   // 處理所有解碼結果（先處理左碼再處理右碼，確保同時掃出雙碼時狀態一次到位）
@@ -335,18 +655,25 @@ function scheduleNextScan() {
 }
 
 /**
- * 請求最佳可用的相機串流（優先高解析度後置鏡頭，失敗時逐步降級約束）
+ * 階梯式請求最佳可用的相機串流（1080p -> 720p -> 無解析度約束）
+ * 避免 1080p 失敗時直接掉回 640x480 低畫質。
+ *
+ * @param deviceId - 指定之鏡頭 deviceId（選填）
  */
-async function requestCameraStream(): Promise<MediaStream> {
+async function requestCameraStream(deviceId?: string): Promise<MediaStream> {
   if (!navigator.mediaDevices || typeof navigator.mediaDevices.getUserMedia !== 'function') {
     throw new Error('瀏覽器不支援相機存取');
   }
+
+  const baseTarget: MediaTrackConstraints = deviceId
+    ? { deviceId: { exact: deviceId } }
+    : { facingMode: { ideal: 'environment' } };
 
   const constraintFallbacks: MediaStreamConstraints[] = [
     {
       audio: false,
       video: {
-        facingMode: { ideal: 'environment' },
+        ...baseTarget,
         width: { ideal: 1920 },
         height: { ideal: 1080 },
       },
@@ -354,14 +681,21 @@ async function requestCameraStream(): Promise<MediaStream> {
     {
       audio: false,
       video: {
-        facingMode: 'environment',
+        ...baseTarget,
+        width: { ideal: 1280 },
+        height: { ideal: 720 },
       },
     },
     {
       audio: false,
-      video: true,
+      video: deviceId ? { deviceId: { exact: deviceId } } : { facingMode: 'environment' },
     },
   ];
+
+  // 未指定特定鏡頭時才加入最終任意鏡頭保底
+  if (!deviceId) {
+    constraintFallbacks.push({ audio: false, video: true });
+  }
 
   let lastError: unknown = null;
   for (const constraints of constraintFallbacks) {
@@ -380,44 +714,229 @@ async function requestCameraStream(): Promise<MediaStream> {
 }
 
 /**
- * 嘗試為啟用中的相機軌道設定連續自動對焦（部分行動裝置支援）
+ * 獨立套用單項進階鏡頭約束（拆開對焦與變焦呼叫，避免單項不支援連帶失敗）
  *
- * @param stream - 已開啟的相機 MediaStream
+ * @param constraint - 欲套用之進階約束物件
+ * @returns 是否套用成功
  */
-async function applyContinuousFocusIfSupported(stream: MediaStream) {
-  const videoTrack = stream.getVideoTracks()[0];
-  if (
-    !videoTrack ||
-    typeof videoTrack.getCapabilities !== 'function' ||
-    typeof videoTrack.applyConstraints !== 'function'
-  ) {
-    return;
+async function applySingleTrackConstraint(
+  constraint: ExtendedTrackConstraintSet
+): Promise<boolean> {
+  const videoTrack = mediaStream?.getVideoTracks()[0];
+  if (!videoTrack || typeof videoTrack.applyConstraints !== 'function') {
+    return false;
   }
 
   try {
-    const capabilities = videoTrack.getCapabilities() as MediaTrackCapabilities & {
-      focusMode?: string[];
+    await videoTrack.applyConstraints({
+      advanced: [constraint],
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * 讀取鏡頭能力並於開流後分別獨立初始化連續對焦與溫和預設變焦
+ *
+ * @param preserveZoom - 是否嘗試沿用呼叫前指定的倍率（切換鏡頭時設為 false）
+ */
+async function initCameraControlsAfterPlay(preserveZoom = false) {
+  const videoTrack = mediaStream?.getVideoTracks()[0];
+  if (!videoTrack || typeof videoTrack.getCapabilities !== 'function') {
+    zoomRange.value = null;
+    currentZoom.value = null;
+    refreshDiagnostics();
+    return;
+  }
+
+  let capabilities: ExtendedTrackCapabilities = {};
+  try {
+    capabilities = videoTrack.getCapabilities() as ExtendedTrackCapabilities;
+  } catch {
+    capabilities = {};
+  }
+
+  // 1. 獨立套用連續自動對焦（於 video.play() 開流後執行以相容 Android Camera2 HAL）
+  if (Array.isArray(capabilities.focusMode) && capabilities.focusMode.includes('continuous')) {
+    const applied = await applySingleTrackConstraint({ focusMode: 'continuous' });
+    if (applied) {
+      diagnosticFocusMode.value = 'continuous';
+    }
+  }
+
+  // 2. 獨立讀取硬體變焦範圍並套用溫和預設倍率（讓使用者拉遠至清晰焦距同時放大 QR Code）
+  const capZoom = capabilities.zoom;
+  if (
+    capZoom &&
+    typeof capZoom.min === 'number' &&
+    typeof capZoom.max === 'number' &&
+    capZoom.max > capZoom.min
+  ) {
+    zoomRange.value = {
+      min: capZoom.min,
+      max: capZoom.max,
+      step: typeof capZoom.step === 'number' && capZoom.step > 0 ? capZoom.step : 0.1,
     };
-    if (Array.isArray(capabilities.focusMode) && capabilities.focusMode.includes('continuous')) {
-      await videoTrack.applyConstraints({
-        advanced: [{ focusMode: 'continuous' } as MediaTrackConstraintSet],
-      });
+
+    let targetZoom: number | null = null;
+    if (preserveZoom && currentZoom.value !== null) {
+      targetZoom = Math.min(capZoom.max, Math.max(capZoom.min, currentZoom.value));
+    } else if (capZoom.min <= 1 && capZoom.max >= 1.5) {
+      // 主鏡頭預設溫和拉至 1.8x（避免過度裁切，同時迫使手距保持在 15~20cm 清晰焦段）
+      targetZoom = Math.min(capZoom.max, 1.8);
+    }
+
+    if (targetZoom !== null) {
+      const zoomed = await applySingleTrackConstraint({ zoom: targetZoom });
+      if (zoomed) {
+        currentZoom.value = Number(targetZoom.toFixed(1));
+      }
+    }
+  } else {
+    zoomRange.value = null;
+    currentZoom.value = null;
+  }
+
+  refreshDiagnostics();
+}
+
+/**
+ * 手動切換鏡頭變焦倍率
+ *
+ * @param targetZoom - 欲套用之目標倍率
+ */
+async function handleSelectZoom(targetZoom: number) {
+  if (!zoomRange.value) return;
+  const clamped = Number(
+    Math.min(zoomRange.value.max, Math.max(zoomRange.value.min, targetZoom)).toFixed(1)
+  );
+  const applied = await applySingleTrackConstraint({ zoom: clamped });
+  if (applied) {
+    currentZoom.value = clamped;
+    refreshDiagnostics();
+  }
+}
+
+/**
+ * 點擊相機預覽區重新對焦（Tap-to-Focus）
+ * 透過先觸發 single-shot（或 manual）再切回 continuous，強制 Android Camera2 HAL 重新啟動自動對焦搜尋。
+ */
+async function handleTapToFocus(event: MouseEvent) {
+  if (!isCameraActive.value || !mediaStream) return;
+
+  const container = readerContainerRef.value;
+  if (container && typeof container.getBoundingClientRect === 'function') {
+    const rect = container.getBoundingClientRect();
+    if (rect.width > 0 && rect.height > 0) {
+      const xPct = Math.min(92, Math.max(8, ((event.clientX - rect.left) / rect.width) * 100));
+      const yPct = Math.min(92, Math.max(8, ((event.clientY - rect.top) / rect.height) * 100));
+      focusIndicator.value = { x: xPct, y: yPct };
+    } else {
+      focusIndicator.value = { x: 50, y: 50 };
+    }
+  } else {
+    focusIndicator.value = { x: 50, y: 50 };
+  }
+
+  if (focusIndicatorTimer !== null) {
+    clearTimeout(focusIndicatorTimer);
+  }
+  focusIndicatorTimer = setTimeout(() => {
+    focusIndicator.value = null;
+  }, 750);
+
+  const videoTrack = mediaStream.getVideoTracks()[0];
+  if (!videoTrack || typeof videoTrack.getCapabilities !== 'function') return;
+
+  let focusModes: string[] = [];
+  try {
+    const caps = videoTrack.getCapabilities() as ExtendedTrackCapabilities;
+    if (Array.isArray(caps.focusMode)) {
+      focusModes = caps.focusMode;
     }
   } catch {
-    // 裝置不支援動態對焦設定時安全忽略
+    return;
+  }
+
+  if (refocusRestoreTimer !== null) {
+    clearTimeout(refocusRestoreTimer);
+    refocusRestoreTimer = null;
+  }
+
+  if (focusModes.includes('single-shot')) {
+    const shotApplied = await applySingleTrackConstraint({ focusMode: 'single-shot' });
+    if (shotApplied) {
+      diagnosticFocusMode.value = 'single-shot';
+    }
+    if (focusModes.includes('continuous')) {
+      refocusRestoreTimer = setTimeout(async () => {
+        if (!isScanning || isDisposed) return;
+        const contApplied = await applySingleTrackConstraint({ focusMode: 'continuous' });
+        if (contApplied) {
+          diagnosticFocusMode.value = 'continuous';
+        }
+        refreshDiagnostics();
+      }, 350);
+    }
+  } else if (focusModes.includes('continuous')) {
+    await applySingleTrackConstraint({ focusMode: 'continuous' });
+    diagnosticFocusMode.value = 'continuous';
+  }
+
+  refreshDiagnostics();
+}
+
+/**
+ * 切換至下一顆可用鏡頭並記憶偏好 deviceId
+ */
+async function handleSwitchCamera() {
+  if (isSwitchingCamera || availableCameras.value.length < 2) return;
+  isSwitchingCamera = true;
+
+  try {
+    const currentIdx = availableCameras.value.findIndex(
+      (cam) => cam.deviceId === currentDeviceId.value
+    );
+    const nextIdx = (currentIdx + 1) % availableCameras.value.length;
+    const nextCamera = availableCameras.value[nextIdx];
+    if (!nextCamera) return;
+
+    savePreferredCameraId(nextCamera.deviceId);
+    await stopScanner();
+    await startScanner(nextCamera.deviceId);
+  } finally {
+    isSwitchingCamera = false;
   }
 }
 
 /**
  * 啟動相機掃描器
+ *
+ * @param preferredDeviceId - 指定欲啟動的鏡頭 deviceId（未傳時優先嘗試記憶鏡頭或預設後置鏡頭）
  */
-async function startScanner() {
+async function startScanner(preferredDeviceId?: string) {
   cameraError.value = '';
   cameraWarning.value = '';
   cameraStatus.value = '正在啟動相機...';
+  diagnosticResolution.value = '';
+  diagnosticFocusMode.value = '';
+
+  const targetDeviceId = preferredDeviceId ?? readPreferredCameraId();
 
   try {
-    const stream = await requestCameraStream();
+    let stream: MediaStream;
+    try {
+      stream = await requestCameraStream(targetDeviceId || undefined);
+    } catch (err: unknown) {
+      // 若記憶之 deviceId 已失效（例如系統重置裝置 ID），改以預設後置鏡頭重試一次
+      if (targetDeviceId && !preferredDeviceId) {
+        stream = await requestCameraStream(undefined);
+      } else {
+        throw err;
+      }
+    }
 
     // 若使用者於授權過程中已關閉彈窗，立即釋放相機避免資源洩漏
     if (isDisposed) {
@@ -426,7 +945,6 @@ async function startScanner() {
     }
 
     mediaStream = stream;
-    await applyContinuousFocusIfSupported(stream);
 
     const video = videoRef.value;
     if (!video) {
@@ -439,11 +957,28 @@ async function startScanner() {
     video.srcObject = stream;
     await video.play();
 
+    // 開流完成後再取得目前裝置 ID、列舉多鏡頭並套用獨立對焦與變焦約束
+    const activeTrack = stream.getVideoTracks()[0];
+    const activeSettings =
+      activeTrack && typeof activeTrack.getSettings === 'function'
+        ? activeTrack.getSettings()
+        : {};
+    const resolvedDeviceId = activeSettings.deviceId || targetDeviceId || '';
+    if (resolvedDeviceId) {
+      currentDeviceId.value = resolvedDeviceId;
+    }
+
+    await refreshAvailableCameras(resolvedDeviceId || undefined);
+    await initCameraControlsAfterPlay(false);
+
     barcodeDetector = await initBarcodeDetector();
+    nativeDetectorFailCount = 0;
     isCameraActive.value = true;
     isScanning = true;
     scanTickCount = 0;
-    cameraStatus.value = '相機啟動成功，請對準發票 QR Code';
+    refreshDiagnostics();
+
+    cameraStatus.value = '相機已就緒，請保持約 15～20 公分對準發票 QR Code';
     scheduleNextScan();
   } catch (err: unknown) {
     await stopScanner();
@@ -464,6 +999,15 @@ async function stopScanner() {
     clearTimeout(scanTimer);
     scanTimer = null;
   }
+  if (focusIndicatorTimer !== null) {
+    clearTimeout(focusIndicatorTimer);
+    focusIndicatorTimer = null;
+  }
+  if (refocusRestoreTimer !== null) {
+    clearTimeout(refocusRestoreTimer);
+    refocusRestoreTimer = null;
+  }
+  focusIndicator.value = null;
 
   if (mediaStream) {
     mediaStream.getTracks().forEach((track) => {
@@ -582,7 +1126,9 @@ onUnmounted(async () => {
           </div>
           <div
             id="qr-reader"
-            class="relative w-full aspect-[4/3] max-h-64 bg-slate-900 rounded-lg overflow-hidden border border-slate-200 text-slate-400 text-xs"
+            ref="readerContainerRef"
+            class="relative w-full aspect-[4/3] max-h-64 bg-slate-900 rounded-lg overflow-hidden border border-slate-200 text-slate-400 text-xs cursor-crosshair select-none"
+            @click="handleTapToFocus"
           >
             <video
               ref="videoRef"
@@ -592,17 +1138,62 @@ onUnmounted(async () => {
               class="w-full h-full object-cover"
             ></video>
 
-            <!-- 視覺對準引導框（僅作畫面引導，不裁切解碼解析度） -->
+            <!-- 視覺對準引導框（對應 1:1 可視中央 ROI 範圍） -->
             <div
               v-if="isCameraActive"
-              class="pointer-events-none absolute inset-0 flex items-center justify-center p-5"
+              class="pointer-events-none absolute inset-0 flex items-center justify-center p-6"
             >
-              <div class="relative w-full h-full max-w-[300px] max-h-[160px] border-2 border-teal-400/80 rounded-lg shadow-[0_0_0_9999px_rgba(15,23,42,0.35)]">
+              <div class="relative w-[84%] h-[72%] max-w-[280px] max-h-[150px] border-2 border-teal-400/80 rounded-lg shadow-[0_0_0_9999px_rgba(15,23,42,0.38)]">
                 <span class="absolute -top-0.5 -left-0.5 w-4 h-4 border-t-4 border-l-4 border-teal-300 rounded-tl"></span>
                 <span class="absolute -top-0.5 -right-0.5 w-4 h-4 border-t-4 border-r-4 border-teal-300 rounded-tr"></span>
                 <span class="absolute -bottom-0.5 -left-0.5 w-4 h-4 border-b-4 border-l-4 border-teal-300 rounded-bl"></span>
                 <span class="absolute -bottom-0.5 -right-0.5 w-4 h-4 border-b-4 border-r-4 border-teal-300 rounded-br"></span>
               </div>
+            </div>
+
+            <!-- 點擊重新對焦視覺回饋方框 -->
+            <div
+              v-if="focusIndicator"
+              class="pointer-events-none absolute w-12 h-12 -translate-x-1/2 -translate-y-1/2 border-2 border-amber-300 rounded-md animate-ping"
+              :style="{ left: `${focusIndicator.x}%`, top: `${focusIndicator.y}%` }"
+            ></div>
+
+            <!-- 相機控制工具列（變焦倍率 ＋ 多鏡頭切換） -->
+            <div
+              v-if="isCameraActive && (zoomPresets.length > 0 || availableCameras.length > 1)"
+              class="absolute bottom-2 inset-x-2 flex items-center justify-between gap-2 pointer-events-auto"
+              @click.stop
+            >
+              <!-- 變焦倍率快速切換 -->
+              <div v-if="zoomPresets.length > 0" class="flex items-center gap-1 bg-slate-900/70 backdrop-blur-xs px-1.5 py-1 rounded-full">
+                <button
+                  v-for="preset in zoomPresets"
+                  :key="preset"
+                  type="button"
+                  data-testid="zoom-btn"
+                  class="px-2 py-0.5 rounded-full text-[11px] font-medium transition-colors"
+                  :class="
+                    currentZoom !== null && Math.abs(currentZoom - preset) < 0.15
+                      ? 'bg-teal-500 text-white'
+                      : 'text-slate-200 hover:bg-slate-700/80'
+                  "
+                  @click="handleSelectZoom(preset)"
+                >
+                  {{ preset }}x
+                </button>
+              </div>
+              <div v-else></div>
+
+              <!-- 多鏡頭切換按鈕 -->
+              <button
+                v-if="availableCameras.length > 1"
+                type="button"
+                data-testid="switch-camera-btn"
+                class="px-2.5 py-1 rounded-full bg-slate-900/75 hover:bg-slate-800 text-white text-[11px] font-medium backdrop-blur-xs border border-white/20"
+                @click="handleSwitchCamera"
+              >
+                切換鏡頭 ({{ currentCameraIndex }}/{{ availableCameras.length }})
+              </button>
             </div>
 
             <!-- 相機尚未就緒時之佔位提示 -->
@@ -612,6 +1203,16 @@ onUnmounted(async () => {
             >
               <span>{{ cameraError ? '相機無法使用，請使用下方手動輸入' : '正在開啟相機鏡頭...' }}</span>
             </div>
+          </div>
+
+          <!-- 精簡實機診斷資訊列（解析度 / 鏡頭 / 倍率 / 對焦 / 引擎） -->
+          <div
+            v-if="diagnosticSummary"
+            data-testid="camera-diagnostics"
+            class="text-[11px] font-mono text-slate-500 bg-slate-50 border border-slate-200 rounded-md px-2 py-1 truncate"
+            :title="diagnosticSummary"
+          >
+            {{ diagnosticSummary }}
           </div>
 
           <!-- 左／右雙碼掃描進度指示 -->
@@ -642,7 +1243,7 @@ onUnmounted(async () => {
         </div>
 
         <p class="text-xs text-slate-500">
-          請將發票左右兩個 QR Code 置於框內保持清晰對焦，或在下方手動輸入左側與右側 QR Code 內容文字。
+          請與發票保持約 15～20 公分對準框內；若畫面模糊可點擊畫面重新對焦、調整倍率或切換後置鏡頭，亦可在下方手動輸入雙碼內容。
         </p>
 
         <!-- 左側 QR Code -->
