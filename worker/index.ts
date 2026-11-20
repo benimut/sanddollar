@@ -458,7 +458,8 @@ async function handleParseInvoice(request: Request, env: Env): Promise<Response>
   const categories = sanitizeCategories(body.categories);
 
   try {
-    const ai = new GoogleGenAI({ apiKey });
+    // Interactions API 的多模態圖片輸入目前需指定 v1beta
+    const ai = new GoogleGenAI({ apiKey, apiVersion: 'v1beta' });
 
     const interaction = await ai.interactions.create({
       model: GEMINI_MODEL,
