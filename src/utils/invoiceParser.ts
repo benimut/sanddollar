@@ -22,19 +22,37 @@ export interface ParsedInvoiceItem {
 }
 
 /**
+ * 解析後之發票折抵項目介面（供紙本發票辨識拆出之獨立折扣使用）
+ */
+export interface ParsedInvoiceDiscount {
+  /** 折扣說明名稱（若照片未標示名稱則保留空字串，由使用者於表單補填） */
+  name: string;
+  /** 折抵金額（正數） */
+  amount: number;
+  /** 對應之支出分類（若無明確對應則為空字串） */
+  category: string;
+}
+
+/**
  * 解析後之完整發票資料結果介面
  */
 export interface ParsedInvoiceResult {
-  /** 發票號碼（前 2 碼大寫英文 + 後 8 碼數字） */
+  /** 發票號碼（電子發票為前 2 碼大寫英文 + 後 8 碼數字；紙本發票若無發票號碼可為空字串） */
   invoiceNumber: string;
-  /** 開立日期（格式：YYYY-MM-DD） */
+  /** 開立日期（格式：YYYY-MM-DD；紙本發票若無確切日期可為空字串） */
   date: string;
-  /** 4 碼隨機碼 */
+  /** 4 碼隨機碼（傳統紙本發票無隨機碼時為空字串） */
   randomCode: string;
   /** 總計金額（十進位整數） */
   totalAmount: number;
   /** 商品品項清單 */
   items: ParsedInvoiceItem[];
+  /** 消費店家名稱（紙本發票僅辨識照片實際印出文字；電子發票無此欄位） */
+  merchant?: string;
+  /** 折扣折抵項目清單（紙本發票辨識拆出） */
+  discounts?: ParsedInvoiceDiscount[];
+  /** 辨識資料來源：'qr' 為電子發票雙碼，'paper' 為紙本發票拍照辨識 */
+  source?: 'qr' | 'paper';
 }
 
 /**

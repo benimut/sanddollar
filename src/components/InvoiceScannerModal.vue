@@ -13,9 +13,10 @@
  */
 
 import { ref, onMounted, onUnmounted } from 'vue';
-import { SwitchCamera, RotateCcw } from 'lucide-vue-next';
+import { SwitchCamera, RotateCcw, Camera, Crop } from 'lucide-vue-next';
 import jsQR from 'jsqr';
 import { parseInvoiceQRCode, type ParsedInvoiceResult } from '@/utils/invoiceParser';
+import ReceiptCropper, { type CroppedImagePayload } from './ReceiptCropper.vue';
 
 /** 瀏覽器原生 BarcodeDetector 單筆偵測結果介面 */
 interface DetectedBarcode {
@@ -79,10 +80,41 @@ const MAX_AUTO_FALLBACK_CAMERAS = 2;
 /** 台灣電子發票左側主體碼格式（至少 77 碼且前 10 碼為 2 碼大寫英文 + 8 碼數字） */
 const TAIWAN_INVOICE_LEFT_PREFIX = /^[A-Z]{2}\d{8}/;
 
+/** 掃描模式：電子發票雙 QR Code 或紙本發票拍照辨識 */
+type ScanMode = 'qr' | 'paper';
+
+/** 紙本發票拍照流程階段 */
+type PaperStep = 'camera' | 'crop' | 'result';
+
+const props = withDefaults(
+  defineProps<{
+    /** 使用者現有支出分類清單（僅於紙本發票模式傳給後端做品項分類對應） */
+    categories?: string[];
+  }>(),
+  {
+    categories: () => [],
+  }
+);
+
 const emit = defineEmits<{
   (e: 'close'): void;
   (e: 'parsed', result: ParsedInvoiceResult): void;
 }>();
+
+/** 當前掃描模式（預設電子發票 QR Code） */
+const scanMode = ref<ScanMode>('qr');
+
+/** 紙本發票流程目前階段 */
+const paperStep = ref<PaperStep>('camera');
+
+/** 紙本發票拍下之原始影像 Data URL（供正矩形框選裁切） */
+const capturedImageUrl = ref('');
+
+/** 是否正在呼叫後端 Gemini API 辨識紙本發票 */
+const isAnalyzingPaper = ref(false);
+
+/** 是否因 Cloudflare Access 登入過期導致 API 驗證失敗 */
+const isAuthExpired = ref(false);
 
 /** 相機即時預覽 video 元素參考 */
 const videoRef = ref<HTMLVideoElement | null>(null);
@@ -727,13 +759,18 @@ async function startScanner(options?: {
     barcodeDetector = await initBarcodeDetector();
     nativeDetectorFailCount = 0;
     isCameraActive.value = true;
-    isScanning = true;
     scanTickCount = 0;
 
-    cameraStatus.value = '請將發票 QR Code 置於畫面中並保持約 15～20 公分';
-    // 等待短暫畫面穩定後再開始解碼，避免首幀晃動誤掃
-    scheduleNextScan(CAMERA_STABILIZE_DELAY_MS);
-    scheduleBackgroundRefocus();
+    if (scanMode.value === 'qr') {
+      isScanning = true;
+      cameraStatus.value = '請將發票 QR Code 置於畫面中並保持約 15～20 公分';
+      // 等待短暫畫面穩定後再開始解碼，避免首幀晃動誤掃
+      scheduleNextScan(CAMERA_STABILIZE_DELAY_MS);
+      scheduleBackgroundRefocus();
+    } else {
+      isScanning = false;
+      cameraStatus.value = '請將紙本發票置於畫面中，對焦清晰後按下拍照';
+    }
   } catch (err: unknown) {
     await stopScanner();
     const msg = err instanceof Error ? err.message : String(err);
@@ -814,6 +851,176 @@ async function stopScanner() {
 }
 
 /**
+ * 切換掃描模式（電子發票 QR Code / 紙本發票拍照辨識）
+ * 切換時共用既有相機串流不重開鏡頭，降低延遲與權限干擾。
+ */
+function handleSwitchMode(mode: ScanMode) {
+  if (scanMode.value === mode || isAnalyzingPaper.value) return;
+
+  scanMode.value = mode;
+  errorMessage.value = '';
+  cameraWarning.value = '';
+  isAuthExpired.value = false;
+  parsedResult.value = null;
+
+  if (mode === 'paper') {
+    pauseScanningLoop();
+    leftCode.value = '';
+    rightCode.value = '';
+    paperStep.value = 'camera';
+    capturedImageUrl.value = '';
+    cameraStatus.value = isCameraActive.value
+      ? '請將紙本發票置於畫面中，對焦清晰後按下拍照'
+      : '';
+  } else {
+    paperStep.value = 'camera';
+    capturedImageUrl.value = '';
+    isScanPaused.value = false;
+    if (isCameraActive.value) {
+      isScanning = true;
+      scanTickCount = 0;
+      cameraStatus.value = '請將發票 QR Code 置於畫面中並保持約 15～20 公分';
+      scheduleNextScan(SCAN_INTERVAL_MS);
+      scheduleBackgroundRefocus();
+    }
+  }
+}
+
+/**
+ * 紙本發票模式：擷取目前相機高解析度影格，進入正矩形框選裁切步驟
+ */
+function handleCapturePaperPhoto() {
+  errorMessage.value = '';
+  isAuthExpired.value = false;
+
+  const video = videoRef.value;
+  if (
+    !video ||
+    !isCameraActive.value ||
+    video.readyState < 2 ||
+    video.videoWidth <= 0 ||
+    video.videoHeight <= 0
+  ) {
+    errorMessage.value = '相機畫面尚未就緒，請稍候再按下拍照。';
+    return;
+  }
+
+  const canvas = document.createElement('canvas');
+  canvas.width = video.videoWidth;
+  canvas.height = video.videoHeight;
+  const ctx = canvas.getContext('2d');
+  if (!ctx) {
+    errorMessage.value = '無法擷取相機畫面，請重試。';
+    return;
+  }
+
+  ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+  capturedImageUrl.value = canvas.toDataURL('image/jpeg', 0.92);
+  parsedResult.value = null;
+  paperStep.value = 'crop';
+}
+
+/**
+ * 紙本發票模式：捨棄目前拍攝畫面，回到即時取景重拍
+ */
+function handlePaperRetake() {
+  if (isAnalyzingPaper.value) return;
+  capturedImageUrl.value = '';
+  parsedResult.value = null;
+  errorMessage.value = '';
+  isAuthExpired.value = false;
+  paperStep.value = 'camera';
+  cameraStatus.value = isCameraActive.value
+    ? '請將紙本發票置於畫面中，對焦清晰後按下拍照'
+    : '';
+}
+
+/**
+ * 紙本發票模式：保留已拍攝照片並返回正矩形裁切步驟微調範圍
+ */
+function handlePaperRecrop() {
+  if (isAnalyzingPaper.value || !capturedImageUrl.value) return;
+  parsedResult.value = null;
+  errorMessage.value = '';
+  isAuthExpired.value = false;
+  paperStep.value = 'crop';
+}
+
+/**
+ * 重新整理頁面以完成 Cloudflare Access 登入驗證續期
+ */
+function handleReloadForAuth() {
+  window.location.reload();
+}
+
+/**
+ * 紙本發票模式：將正矩形裁切並壓縮後之影像送往同源 Worker API 進行 Gemini AI 辨識
+ */
+async function handlePaperCropConfirm(payload: CroppedImagePayload) {
+  if (isAnalyzingPaper.value) return;
+  errorMessage.value = '';
+  isAuthExpired.value = false;
+
+  if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+    errorMessage.value = '目前處於離線狀態，紙本發票 AI 辨識需要網路連線。';
+    return;
+  }
+
+  isAnalyzingPaper.value = true;
+  try {
+    const response = await fetch('/api/parse-invoice', {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        imageBase64: payload.imageBase64,
+        mimeType: payload.mimeType,
+        categories: props.categories,
+      }),
+    });
+
+    const responseContentType = response.headers.get('content-type') || '';
+
+    // 若遭遇 Cloudflare Access 登入過期，可能會收到 401/403 或被重導向至 HTML 登入頁
+    if (
+      response.redirected ||
+      response.status === 401 ||
+      response.status === 403 ||
+      !responseContentType.toLowerCase().includes('application/json')
+    ) {
+      isAuthExpired.value = true;
+      errorMessage.value =
+        '登入驗證可能已過期，請重新整理頁面完成 Cloudflare Access 驗證後再試。';
+      return;
+    }
+
+    const data = (await response.json()) as {
+      result?: ParsedInvoiceResult;
+      error?: string;
+    };
+
+    if (!response.ok || !data.result) {
+      errorMessage.value =
+        data.error || `發票辨識失敗（狀態碼 ${response.status}），請確認照片清晰度後重試。`;
+      return;
+    }
+
+    parsedResult.value = {
+      ...data.result,
+      source: 'paper',
+    };
+    paperStep.value = 'result';
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    errorMessage.value = `無法連線至紙本發票辨識服務 (${msg})，請確認網路連線後重試。`;
+  } finally {
+    isAnalyzingPaper.value = false;
+  }
+}
+
+/**
  * 依目前已掃描之左／右 QR Code 內容解析發票資訊
  * 商品分類統一留空，帶入支出表單後再依表單規則處理與驗證。
  */
@@ -832,7 +1039,10 @@ function parseCurrentCodes() {
       }
     }
 
-    parsedResult.value = result;
+    parsedResult.value = {
+      ...result,
+      source: 'qr',
+    };
   } catch (err: unknown) {
     errorMessage.value =
       err instanceof Error ? err.message : (String(err) || '發票解析失敗，請確認 QR Code 格式');
@@ -877,7 +1087,9 @@ onUnmounted(async () => {
     <div class="bg-white rounded-2xl max-w-lg w-full p-5 sm:p-6 shadow-xl max-h-[90vh] flex flex-col overflow-hidden">
       <!-- 標題欄 -->
       <div class="flex items-center justify-between pb-3 border-b border-slate-100">
-        <h3 id="modal-title" class="text-lg font-bold text-slate-800">電子發票掃描</h3>
+        <h3 id="modal-title" class="text-lg font-bold text-slate-800">
+          {{ scanMode === 'qr' ? '電子發票掃描' : '紙本發票拍照辨識' }}
+        </h3>
         <button
           type="button"
           class="text-slate-400 hover:text-slate-600 p-1 rounded-lg"
@@ -888,10 +1100,48 @@ onUnmounted(async () => {
         </button>
       </div>
 
+      <!-- 模式切換列（電子發票雙 QR / 紙本發票拍照） -->
+      <div class="pt-3">
+        <div class="flex rounded-xl bg-slate-100 p-1" role="tablist" aria-label="發票掃描模式">
+          <button
+            type="button"
+            role="tab"
+            data-testid="mode-qr-btn"
+            :aria-selected="scanMode === 'qr'"
+            :disabled="isAnalyzingPaper"
+            class="flex-1 py-1.5 text-xs font-bold rounded-lg transition-all"
+            :class="
+              scanMode === 'qr'
+                ? 'bg-white text-teal-700 shadow-xs'
+                : 'text-slate-500 hover:text-slate-800'
+            "
+            @click="handleSwitchMode('qr')"
+          >
+            電子發票 QR
+          </button>
+          <button
+            type="button"
+            role="tab"
+            data-testid="mode-paper-btn"
+            :aria-selected="scanMode === 'paper'"
+            :disabled="isAnalyzingPaper"
+            class="flex-1 py-1.5 text-xs font-bold rounded-lg transition-all"
+            :class="
+              scanMode === 'paper'
+                ? 'bg-white text-teal-700 shadow-xs'
+                : 'text-slate-500 hover:text-slate-800'
+            "
+            @click="handleSwitchMode('paper')"
+          >
+            紙本發票拍照
+          </button>
+        </div>
+      </div>
+
       <!-- 內容區 -->
       <div class="py-3 space-y-3 overflow-y-auto flex-1">
-        <!-- 相機預覽容器（object-contain 完整呈現拍攝畫面，所見即所掃） -->
-        <div class="space-y-2">
+        <!-- 相機預覽容器（QR 模式全程顯示；紙本模式於 camera 階段顯示，以 v-show 保持串流不斷線） -->
+        <div v-show="scanMode === 'qr' || paperStep === 'camera'" class="space-y-2">
           <div v-if="cameraStatus" class="text-xs text-teal-600 font-medium">
             {{ cameraStatus }}
           </div>
@@ -930,8 +1180,8 @@ onUnmounted(async () => {
             </div>
           </div>
 
-          <!-- 左／右雙碼掃描進度與重新掃描按鈕 -->
-          <div class="flex items-center justify-between gap-2 text-[11px]">
+          <!-- 電子發票模式：左／右雙碼掃描進度與重新掃描按鈕 -->
+          <div v-if="scanMode === 'qr'" class="flex items-center justify-between gap-2 text-[11px]">
             <div class="flex items-center gap-2">
               <span
                 class="px-2 py-0.5 rounded-full font-medium"
@@ -959,6 +1209,23 @@ onUnmounted(async () => {
             </button>
           </div>
 
+          <!-- 紙本發票模式：拍照快門按鈕（僅支援即時拍照，不提供相簿上傳） -->
+          <div v-else class="space-y-2 pt-1">
+            <button
+              type="button"
+              data-testid="capture-paper-btn"
+              :disabled="!isCameraActive"
+              class="w-full py-2.5 px-4 bg-teal-600 hover:bg-teal-700 active:scale-[0.99] text-white font-bold text-sm rounded-xl shadow-xs transition flex items-center justify-center gap-2 disabled:opacity-50"
+              @click="handleCapturePaperPhoto"
+            >
+              <Camera class="w-4 h-4" />
+              <span>拍照並框選範圍</span>
+            </button>
+            <p class="text-[11px] text-slate-400 text-center">
+              拍照後可先以正矩形裁切發票文字區域，再送交 Gemini AI 辨識（請避開完整卡號等個資）
+            </p>
+          </div>
+
           <!-- 非發票 QR Code 即時提醒 -->
           <div v-if="cameraWarning" class="text-xs text-amber-700 bg-amber-50 p-2 rounded-lg border border-amber-200">
             {{ cameraWarning }}
@@ -968,24 +1235,72 @@ onUnmounted(async () => {
           <div v-if="cameraError" class="text-xs text-rose-600 bg-rose-50 p-2.5 rounded-lg border border-rose-200">
             {{ cameraError }}
           </div>
+        </div>
 
-          <!-- 格式解析錯誤提示 -->
-          <div v-if="errorMessage" class="text-xs text-rose-600 bg-rose-50 p-2.5 rounded-lg border border-rose-200">
-            {{ errorMessage }}
+        <!-- 紙本發票模式：正矩形框選裁切步驟 -->
+        <ReceiptCropper
+          v-if="scanMode === 'paper' && paperStep === 'crop' && capturedImageUrl"
+          :image-data-url="capturedImageUrl"
+          :is-submitting="isAnalyzingPaper"
+          @retake="handlePaperRetake"
+          @confirm="handlePaperCropConfirm"
+        />
+
+        <!-- 紙本發票模式：辨識完成後之快速重拍／重新裁切操作列 -->
+        <div
+          v-if="scanMode === 'paper' && paperStep === 'result'"
+          class="flex items-center justify-between gap-2 text-xs"
+        >
+          <span class="text-teal-700 font-semibold">AI 辨識完成，請核對後帶入表單</span>
+          <div class="flex items-center gap-1.5">
+            <button
+              type="button"
+              data-testid="recrop-paper-btn"
+              class="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-700 font-medium"
+              @click="handlePaperRecrop"
+            >
+              <Crop class="w-3 h-3" />
+              <span>重新裁切</span>
+            </button>
+            <button
+              type="button"
+              data-testid="retake-after-result-btn"
+              class="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-700 font-medium"
+              @click="handlePaperRetake"
+            >
+              <RotateCcw class="w-3 h-3" />
+              <span>重拍</span>
+            </button>
           </div>
         </div>
 
-        <!-- 解析預覽結果（緊鄰相機下方，掃描完成即可確認並帶入表單） -->
+        <!-- 格式解析／AI 辨識錯誤提示 -->
+        <div v-if="errorMessage" class="text-xs text-rose-600 bg-rose-50 p-2.5 rounded-lg border border-rose-200 space-y-2">
+          <div>{{ errorMessage }}</div>
+          <button
+            v-if="isAuthExpired"
+            type="button"
+            class="px-2.5 py-1 rounded-md bg-rose-600 text-white font-semibold hover:bg-rose-700"
+            @click="handleReloadForAuth"
+          >
+            重新整理完成驗證
+          </button>
+        </div>
+
+        <!-- 解析預覽結果（緊鄰相機或裁切區下方，辨識完成即可確認並帶入表單） -->
         <div v-if="parsedResult" class="bg-teal-50 border border-teal-200 rounded-xl p-3 space-y-2.5">
-          <div class="flex justify-between text-xs text-teal-800 font-semibold">
-            <span>發票號碼：{{ parsedResult.invoiceNumber }}</span>
-            <span>開立日期：{{ parsedResult.date }}</span>
+          <div v-if="parsedResult.merchant" class="text-xs text-teal-950 font-bold">
+            店家名稱：{{ parsedResult.merchant }}
+          </div>
+          <div class="flex justify-between text-xs text-teal-800 font-semibold gap-2 flex-wrap">
+            <span>發票號碼：{{ parsedResult.invoiceNumber || '無' }}</span>
+            <span>開立日期：{{ parsedResult.date || '未辨識' }}</span>
           </div>
           <div class="text-xs text-teal-900 font-bold">
             總計金額：NT$ {{ parsedResult.totalAmount }}
           </div>
 
-          <!-- 商品明細純預覽（分類於帶入支出表單後選擇） -->
+          <!-- 商品明細純預覽（紙本模式一併顯示對應分類標籤） -->
           <div v-if="parsedResult.items && parsedResult.items.length > 0" class="space-y-1.5">
             <span class="block text-xs font-semibold text-teal-950">
               商品明細 ({{ parsedResult.items.length }} 項)：
@@ -996,9 +1311,17 @@ onUnmounted(async () => {
                 :key="idx"
                 class="flex items-center justify-between p-2 bg-white rounded-lg border border-teal-100 text-xs gap-2"
               >
-                <span class="font-medium text-slate-800 truncate" :title="item.name">
-                  {{ item.name }}
-                </span>
+                <div class="min-w-0 flex items-center gap-1.5">
+                  <span class="font-medium text-slate-800 truncate" :title="item.name">
+                    {{ item.name }}
+                  </span>
+                  <span
+                    v-if="item.category"
+                    class="px-1.5 py-0.5 rounded bg-teal-100 text-teal-800 text-[10px] font-medium shrink-0"
+                  >
+                    {{ item.category }}
+                  </span>
+                </div>
                 <span class="text-slate-500 text-[11px] shrink-0">
                   {{ item.quantity }} × NT$ {{ item.unitPrice }} = NT$ {{ item.subtotal }}
                 </span>
@@ -1007,6 +1330,35 @@ onUnmounted(async () => {
           </div>
           <div v-else class="text-xs text-slate-500 italic">
             無商品品項明細（純金額發票）
+          </div>
+
+          <!-- 紙本發票辨識出之折扣明細預覽 -->
+          <div v-if="parsedResult.discounts && parsedResult.discounts.length > 0" class="space-y-1.5 pt-1 border-t border-teal-200/70">
+            <span class="block text-xs font-semibold text-rose-700">
+              折抵項目 ({{ parsedResult.discounts.length }} 項)：
+            </span>
+            <div class="space-y-1">
+              <div
+                v-for="(disc, dIdx) in parsedResult.discounts"
+                :key="dIdx"
+                class="flex items-center justify-between p-2 bg-white rounded-lg border border-rose-100 text-xs gap-2"
+              >
+                <div class="min-w-0 flex items-center gap-1.5">
+                  <span class="font-medium text-slate-700 truncate">
+                    {{ disc.name || '（未命名，帶入後請填寫）' }}
+                  </span>
+                  <span
+                    v-if="disc.category"
+                    class="px-1.5 py-0.5 rounded bg-rose-100 text-rose-700 text-[10px] font-medium shrink-0"
+                  >
+                    {{ disc.category }}
+                  </span>
+                </div>
+                <span class="text-rose-600 font-semibold text-[11px] shrink-0">
+                  -NT$ {{ disc.amount }}
+                </span>
+              </div>
+            </div>
           </div>
         </div>
       </div>
