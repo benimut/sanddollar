@@ -1176,5 +1176,67 @@ describe('Sand Dollar 設定頁面與導覽整合單元測試 (settings_view.spe
         'low'
       );
     });
+
+    it('點擊「登出 Cloudflare 授權」時應先檢查授權狀態：未授權僅提示不跳轉，已授權則導向動態登出端點', async () => {
+      const originalLocation = window.location;
+      const assignMock = vi.fn();
+      Object.defineProperty(window, 'location', {
+        value: {
+          pathname: '/',
+          search: '',
+          assign: assignMock,
+        },
+        configurable: true,
+      });
+
+      const fetchMock = vi
+        .fn()
+        .mockResolvedValueOnce({
+          type: 'opaqueredirect',
+          redirected: false,
+          status: 302,
+          ok: false,
+          headers: new Headers(),
+        } as Response)
+        .mockResolvedValueOnce(
+          new Response(JSON.stringify({ authenticated: true }), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          })
+        );
+      vi.stubGlobal('fetch', fetchMock);
+
+      const mounted = mountComponent(SettingsView);
+      activeCleanups.push(mounted.cleanup);
+      await flushAsync(60);
+
+      try {
+        const logoutBtn = mounted.container.querySelector('#btn-cloudflare-logout') as HTMLButtonElement;
+        expect(logoutBtn).not.toBeNull();
+
+        // 情境 1：目前未授權，僅顯示提示不跳轉
+        logoutBtn.click();
+        await flushAsync(40);
+
+        expect(fetchMock).toHaveBeenCalledTimes(1);
+        expect(assignMock).not.toHaveBeenCalled();
+        expect(
+          mounted.container.querySelector('[data-testid="cloudflare-logout-message"]')?.textContent
+        ).toContain('尚未授權登入 Cloudflare');
+
+        // 情境 2：目前已完成授權，導向同源動態登出端點 /api/auth?logout=1
+        logoutBtn.click();
+        await flushAsync(40);
+
+        expect(fetchMock).toHaveBeenCalledTimes(2);
+        expect(assignMock).toHaveBeenCalledWith('/api/auth?logout=1&returnTo=%2F');
+      } finally {
+        vi.unstubAllGlobals();
+        Object.defineProperty(window, 'location', {
+          value: originalLocation,
+          configurable: true,
+        });
+      }
+    });
   });
 });

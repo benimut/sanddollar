@@ -1,19 +1,17 @@
 <script setup lang="ts">
 /**
  * @file InvoiceScannerModal.vue
- * @description 電子發票雙 QR Code 相機掃描彈窗元件
+ * @description 發票整合相機掃描與 AI 辨識彈窗元件（方案 B+ 單一畫面整合）
  *
  * 核心業務職責：
- * 1. 所見即所掃的完整相機預覽：使用 object-contain 完整呈現鏡頭畫面不裁切，確保螢幕看到的區域即為掃描範圍，不出現畫面外提前誤掃。
- * 2. 免手動調整的智慧選鏡與自動對焦：
- *    - 優先使用曾成功掃出發票的記憶鏡頭；若預設鏡頭不支援自動對焦，自動靜默切換其他後置鏡頭。
- *    - 維持連續自動對焦並於久未解碼時溫和背景重對焦；多後置鏡頭時僅於角落保留精巧圖示按鈕作為切換逃生口。
- * 3. 雙引擎高解析度解碼：優先使用瀏覽器原生 BarcodeDetector（單幀可同時讀取左右雙碼），不支援或未命中時以 jsQR 全圖＋左右分區與 Big5 備援解碼。
- * 4. 無阻擋一鍵帶入表單：掃描端不選擇也不阻擋分類，解析後直接預覽並帶入支出表單，交由表單儲存時驗證分類。
+ * 1. 純離線優先掃描：開啟即啟動雙引擎 QR Code 掃描（原生 BarcodeDetector 與 jsQR+Big5 備援），嚴格不觸發任何網路或認證請求。
+ * 2. 所見即所掃且整合 AI 快門：單一相機預覽視窗保留「✨📷 AI 辨識／補充」按鈕，點擊當下才檢查 Cloudflare Access 授權並定格畫面。
+ * 3. QR + AI 混合互補與自動初框：拍照瞬間先於本機嘗試讀取電子發票 QR 位置與內容，進裁切頁自動預框並把 QR 權威資料送交後端融合補店名與分類。
+ * 4. 無阻擋一鍵帶入表單：掃描端不選擇也不阻擋分類，解析後直接預覽並帶入支出表單。
  */
 
 import { ref, computed, onMounted, onUnmounted } from 'vue';
-import { SwitchCamera, RotateCcw, Camera, Crop, ShieldCheck } from 'lucide-vue-next';
+import { SwitchCamera, RotateCcw, Crop, ShieldCheck } from 'lucide-vue-next';
 import jsQR from 'jsqr';
 import { parseInvoiceQRCode, type ParsedInvoiceResult } from '@/utils/invoiceParser';
 import {
@@ -22,11 +20,18 @@ import {
   type AiMediaResolution,
   type AiThinkingLevel,
 } from '@/utils/aiInvoiceSettings';
+import type { NormalizedRect } from '@/utils/receiptAutoCrop';
 import ReceiptCropper, { type CroppedImagePayload } from './ReceiptCropper.vue';
 
 /** 瀏覽器原生 BarcodeDetector 單筆偵測結果介面 */
 interface DetectedBarcode {
   rawValue?: string;
+  boundingBox?: {
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+  };
 }
 
 /** 瀏覽器原生 BarcodeDetector 實例介面 */
@@ -86,15 +91,12 @@ const MAX_AUTO_FALLBACK_CAMERAS = 2;
 /** 台灣電子發票左側主體碼格式（至少 77 碼且前 10 碼為 2 碼大寫英文 + 8 碼數字） */
 const TAIWAN_INVOICE_LEFT_PREFIX = /^[A-Z]{2}\d{8}/;
 
-/** 掃描模式：電子發票雙 QR Code 或紙本發票拍照辨識 */
-type ScanMode = 'qr' | 'paper';
-
-/** 紙本發票拍照流程階段 */
-type PaperStep = 'camera' | 'crop' | 'result';
+/** 發票掃描與 AI 辨識流程階段 */
+type ScannerStep = 'camera' | 'crop' | 'result';
 
 const props = withDefaults(
   defineProps<{
-    /** 使用者現有支出分類清單（僅於紙本發票模式傳給後端做品項分類對應） */
+    /** 使用者現有支出分類清單（僅於觸發 AI 辨識時傳給後端做品項分類對應） */
     categories?: string[];
   }>(),
   {
@@ -107,11 +109,14 @@ const emit = defineEmits<{
   (e: 'parsed', result: ParsedInvoiceResult): void;
 }>();
 
-/** 當前掃描模式（預設電子發票 QR Code） */
-const scanMode = ref<ScanMode>('qr');
+/** 當前掃描與 AI 辨識流程階段 */
+const scannerStep = ref<ScannerStep>('camera');
 
-/** 紙本發票流程目前階段 */
-const paperStep = ref<PaperStep>('camera');
+/** 由電子發票 QR Code 離線解析出之權威結構骨架（作為 QR+AI 混合補強依據） */
+const qrParsedResult = ref<ParsedInvoiceResult | null>(null);
+
+/** 定格照片上偵測到的電子發票 QR 歸一化錨點座標（供自動初框參考） */
+const capturedQrAnchorRect = ref<NormalizedRect | null>(null);
 
 /** 紙本發票拍照之暫存影像 URL（Object URL 或降級 Data URL，供正矩形框選裁切） */
 const capturedImageUrl = ref('');
@@ -119,7 +124,7 @@ const capturedImageUrl = ref('');
 /** 由 URL.createObjectURL 建立之 Object URL 參照（供安全回收記憶體） */
 let capturedObjectUrl = '';
 
-/** 紙本發票 AI 辨識實測效能摘要結構 */
+/** AI 辨識實測效能摘要結構 */
 interface PaperParseMetrics {
   model: AiInvoiceModelId | string;
   thinkingLevel: AiThinkingLevel | string;
@@ -132,16 +137,34 @@ interface PaperParseMetrics {
   thoughtTokens?: number;
 }
 
-/** 最近一次紙本發票 AI 辨識之實測效能與 Token 統計 */
+/** 最近一次 AI 發票辨識之實測效能與 Token 統計 */
 const paperParseMetrics = ref<PaperParseMetrics | null>(null);
 
-/** 是否正在呼叫後端 Gemini API 辨識紙本發票 */
+/** 是否正在呼叫後端 Gemini API 辨識發票 */
 const isAnalyzingPaper = ref(false);
 
-/** 紙本發票是否正在擷取靜態影像中 */
-let isCapturingPhoto = false;
+/** 是否正在擷取靜態影像或檢查 AI 授權中 */
+const isPreparingAiCapture = ref(false);
 
-/** 紙本發票結果預覽區之單行實測效能摘要文字 */
+/** 單一整合相機頁面的 AI 快門按鈕文案 */
+const aiButtonLabel = computed(() =>
+  qrParsedResult.value ? '✨📷 AI 辨識補充' : '✨📷 AI 辨識'
+);
+
+/** 裁切畫面頂部顯示的電子發票 QR 融合提示 */
+const cropperQrHintText = computed(() => {
+  const qr = qrParsedResult.value;
+  if (!qr) return '';
+  const summaryParts = [
+    qr.invoiceNumber,
+    qr.totalAmount > 0 ? `NT$ ${qr.totalAmount}` : '',
+  ].filter(Boolean);
+  return summaryParts.length > 0
+    ? `已結合電子發票 QR（${summaryParts.join(' · ')}），請確保框選包含發票上方店家名稱`
+    : '已結合電子發票 QR，請確保框選包含發票上方店家名稱';
+});
+
+/** AI 發票辨識結果預覽區之單行實測效能與成本摘要文字 */
 const formattedPaperMetrics = computed(() => {
   const m = paperParseMetrics.value;
   if (!m) return '';
@@ -153,19 +176,20 @@ const formattedPaperMetrics = computed(() => {
       : `總計 ${totalSec}s`;
 
   const tokenParts: string[] = [];
-  if (typeof m.inputTokens === 'number') tokenParts.push(`輸 ${m.inputTokens}`);
-  if (typeof m.thoughtTokens === 'number') tokenParts.push(`思 ${m.thoughtTokens}`);
-  if (typeof m.outputTokens === 'number') tokenParts.push(`出 ${m.outputTokens}`);
+  if (typeof m.inputTokens === 'number') tokenParts.push(`輸入 ${m.inputTokens}`);
+  if (typeof m.thoughtTokens === 'number') tokenParts.push(`思考 ${m.thoughtTokens}`);
+  if (typeof m.outputTokens === 'number') tokenParts.push(`輸出 ${m.outputTokens}`);
 
-  const tokenSuffix = tokenParts.length > 0 ? ` · ${tokenParts.join(' / ')} tok` : '';
-  return `${m.model} · ${m.thinkingLevel} · ${m.mediaResolution} ｜ ${timePart} · ${m.imageKB} KB${tokenSuffix}`;
+  const costSuffix =
+    tokenParts.length > 0 ? ` ｜ 花費成本：${tokenParts.join(' / ')} token` : '';
+  return `${m.model} · ${m.thinkingLevel} · ${m.mediaResolution} ｜ ${timePart} · ${m.imageKB} KB${costSuffix}`;
 });
 
-/** 紙本發票 AI 認證狀態：unknown 未檢查 / checking 檢查中 / authenticated 已通過 / required 需認證 */
-type PaperAuthState = 'unknown' | 'checking' | 'authenticated' | 'required';
+/** AI 認證狀態：unknown 未檢查 / checking 檢查中 / authenticated 已通過 / required 需認證 */
+type AiAuthState = 'unknown' | 'checking' | 'authenticated' | 'required';
 
-/** 紙本發票 AI 認證狀態 */
-const paperAuthState = ref<PaperAuthState>('unknown');
+/** AI 辨識授權狀態（預設未檢查，開啟彈窗絕不自動發送認證檢查） */
+const aiAuthState = ref<AiAuthState>('unknown');
 
 /** 是否因 Cloudflare Access 登入過期導致 API 驗證失敗 */
 const isAuthExpired = ref(false);
@@ -439,12 +463,136 @@ function extractJsQrText(code: ReturnType<typeof jsQR>): string {
   return '';
 }
 
+/** 單筆 QR 解碼文字與歸一化座標位置 */
+interface DecodedQrHit {
+  text: string;
+  rect: NormalizedRect | null;
+}
+
 /**
- * 將目前完整相機畫面繪製至離屏高解析度畫布供 jsQR 解碼
+ * 判斷解碼字串是否符合台灣電子發票左碼或右碼格式
  */
-function drawFullFrameToCanvas(video: HTMLVideoElement): { width: number; height: number } | null {
-  const srcWidth = video.videoWidth;
-  const srcHeight = video.videoHeight;
+function isTaiwanInvoiceQrText(text: string): boolean {
+  return text.startsWith('**') || (text.length >= 77 && TAIWAN_INVOICE_LEFT_PREFIX.test(text));
+}
+
+/**
+ * 安全計算 jsQR corner 座標轉換為整張原圖之歸一化正矩形
+ */
+function computeJsQrNormalizedRect(
+  code: ReturnType<typeof jsQR>,
+  regionOffsetX: number,
+  regionOffsetY: number,
+  canvasWidth: number,
+  canvasHeight: number
+): NormalizedRect | null {
+  const loc = code?.location as
+    | {
+        topLeftCorner?: { x?: number; y?: number };
+        topRightCorner?: { x?: number; y?: number };
+        bottomLeftCorner?: { x?: number; y?: number };
+        bottomRightCorner?: { x?: number; y?: number };
+      }
+    | undefined;
+  if (
+    !loc?.topLeftCorner ||
+    !loc?.topRightCorner ||
+    !loc?.bottomLeftCorner ||
+    !loc?.bottomRightCorner ||
+    canvasWidth <= 0 ||
+    canvasHeight <= 0
+  ) {
+    return null;
+  }
+
+  const corners = [
+    loc.topLeftCorner,
+    loc.topRightCorner,
+    loc.bottomLeftCorner,
+    loc.bottomRightCorner,
+  ];
+  const xs: number[] = [];
+  const ys: number[] = [];
+  for (const pt of corners) {
+    if (typeof pt.x !== 'number' || typeof pt.y !== 'number') return null;
+    if (!Number.isFinite(pt.x) || !Number.isFinite(pt.y)) return null;
+    xs.push(pt.x + regionOffsetX);
+    ys.push(pt.y + regionOffsetY);
+  }
+
+  const minX = Math.max(0, Math.min(...xs) / canvasWidth);
+  const maxX = Math.min(1, Math.max(...xs) / canvasWidth);
+  const minY = Math.max(0, Math.min(...ys) / canvasHeight);
+  const maxY = Math.min(1, Math.max(...ys) / canvasHeight);
+  const width = maxX - minX;
+  const height = maxY - minY;
+  if (width <= 0 || height <= 0) return null;
+
+  return { x: minX, y: minY, width, height };
+}
+
+/**
+ * 將原生 BarcodeDetector 的 boundingBox 轉換為歸一化正矩形
+ */
+function computeBarcodeNormalizedRect(
+  box: DetectedBarcode['boundingBox'],
+  canvasWidth: number,
+  canvasHeight: number
+): NormalizedRect | null {
+  if (!box || canvasWidth <= 0 || canvasHeight <= 0) return null;
+  if (
+    !Number.isFinite(box.x) ||
+    !Number.isFinite(box.y) ||
+    !Number.isFinite(box.width) ||
+    !Number.isFinite(box.height) ||
+    box.width <= 0 ||
+    box.height <= 0
+  ) {
+    return null;
+  }
+
+  const x1 = Math.max(0, box.x / canvasWidth);
+  const y1 = Math.max(0, box.y / canvasHeight);
+  const x2 = Math.min(1, (box.x + box.width) / canvasWidth);
+  const y2 = Math.min(1, (box.y + box.height) / canvasHeight);
+  if (x2 <= x1 || y2 <= y1) return null;
+
+  return { x: x1, y: y1, width: x2 - x1, height: y2 - y1 };
+}
+
+/**
+ * 合併多個非空歸一化矩形為單一外接聯集矩形
+ */
+function mergeNormalizedRects(rects: Array<NormalizedRect | null | undefined>): NormalizedRect | null {
+  const valid = rects.filter((r): r is NormalizedRect => Boolean(r && r.width > 0 && r.height > 0));
+  if (valid.length === 0) return null;
+
+  let minX = 1;
+  let minY = 1;
+  let maxX = 0;
+  let maxY = 0;
+  for (const r of valid) {
+    if (r.x < minX) minX = r.x;
+    if (r.y < minY) minY = r.y;
+    if (r.x + r.width > maxX) maxX = r.x + r.width;
+    if (r.y + r.height > maxY) maxY = r.y + r.height;
+  }
+  return {
+    x: minX,
+    y: minY,
+    width: Math.max(0, maxX - minX),
+    height: Math.max(0, maxY - minY),
+  };
+}
+
+/**
+ * 將 video 或靜態 canvas 繪製至離屏高解析度畫布供 jsQR 解碼
+ */
+function drawSourceToOffscreenCanvas(
+  source: HTMLVideoElement | HTMLCanvasElement,
+  srcWidth: number,
+  srcHeight: number
+): { width: number; height: number } | null {
   const maxSide = Math.max(srcWidth, srcHeight);
   const scale = maxSide > MAX_JSQR_DIMENSION ? MAX_JSQR_DIMENSION / maxSide : 1;
   const targetWidth = Math.max(16, Math.round(srcWidth * scale));
@@ -461,25 +609,20 @@ function drawFullFrameToCanvas(video: HTMLVideoElement): { width: number; height
     offscreenCanvas.height = targetHeight;
   }
 
-  offscreenCtx.drawImage(video, 0, 0, targetWidth, targetHeight);
+  offscreenCtx.drawImage(source, 0, 0, targetWidth, targetHeight);
   return { width: targetWidth, height: targetHeight };
 }
 
 /**
- * 使用 jsQR 對完整高解析度畫面進行全圖與左右分區解碼
+ * 使用 jsQR 對完整高解析度畫面進行全圖與左右分區解碼（附帶座標位置）
  * 台灣電子發票的左、右兩顆 QR Code 緊鄰並排，分區裁切可避免兩組定位點互相干擾並支援同時讀取雙碼。
- *
- * @param ctx - 已繪製目前相機影格的 2D 畫布環境
- * @param width - 畫布寬度
- * @param height - 畫布高度
- * @returns 本幀解碼出之不重複字串清單
  */
-function decodeWithJsQr(
+function decodeWithJsQrHits(
   ctx: CanvasRenderingContext2D,
   width: number,
   height: number
-): string[] {
-  const results = new Set<string>();
+): DecodedQrHit[] {
+  const hitMap = new Map<string, NormalizedRect | null>();
   const leftWidth = Math.floor(width * 0.6);
   const rightStartX = Math.floor(width * 0.4);
   const rightWidth = width - rightStartX;
@@ -498,15 +641,29 @@ function decodeWithJsQr(
         inversionAttempts: 'attemptBoth',
       });
       const text = extractJsQrText(decoded);
-      if (text) {
-        results.add(text);
+      if (text && !hitMap.has(text)) {
+        hitMap.set(
+          text,
+          computeJsQrNormalizedRect(decoded, region.x, region.y, width, height)
+        );
       }
     } catch {
       // 略過單一分區讀取異常，避免中斷掃描迴圈
     }
   }
 
-  return Array.from(results);
+  return Array.from(hitMap.entries()).map(([text, rect]) => ({ text, rect }));
+}
+
+/**
+ * 使用 jsQR 對完整高解析度畫面進行全圖與左右分區解碼（純文字清單）
+ */
+function decodeWithJsQr(
+  ctx: CanvasRenderingContext2D,
+  width: number,
+  height: number
+): string[] {
+  return decodeWithJsQrHits(ctx, width, height).map((hit) => hit.text);
 }
 
 /**
@@ -628,7 +785,7 @@ async function scanSingleFrame() {
     (!barcodeDetector || scanTickCount % JSQR_ASSIST_INTERVAL_TICKS === 0);
 
   if (shouldRunJsQr) {
-    const drawn = drawFullFrameToCanvas(video);
+    const drawn = drawSourceToOffscreenCanvas(video, video.videoWidth, video.videoHeight);
     if (drawn && offscreenCtx) {
       const jsQrTexts = decodeWithJsQr(offscreenCtx, drawn.width, drawn.height);
       decodedTexts.push(...jsQrTexts);
@@ -815,16 +972,11 @@ async function startScanner(options?: {
     isCameraActive.value = true;
     scanTickCount = 0;
 
-    if (scanMode.value === 'qr') {
-      isScanning = true;
-      cameraStatus.value = '請將發票 QR Code 置於畫面中並保持約 15～20 公分';
-      // 等待短暫畫面穩定後再開始解碼，避免首幀晃動誤掃
-      scheduleNextScan(CAMERA_STABILIZE_DELAY_MS);
-      scheduleBackgroundRefocus();
-    } else {
-      isScanning = false;
-      cameraStatus.value = '請將紙本發票置於畫面中，對焦清晰後按下拍照';
-    }
+    isScanning = true;
+    cameraStatus.value = '請將發票 QR Code 置於畫面中（約 15～20 公分），或直接點擊下方 AI 辨識';
+    // 等待短暫畫面穩定後再開始解碼，避免首幀晃動誤掃
+    scheduleNextScan(CAMERA_STABILIZE_DELAY_MS);
+    scheduleBackgroundRefocus();
   } catch (err: unknown) {
     await stopScanner();
     const msg = err instanceof Error ? err.message : String(err);
@@ -861,15 +1013,19 @@ async function handleSwitchCamera() {
 function handleRescan() {
   leftCode.value = '';
   rightCode.value = '';
+  qrParsedResult.value = null;
+  capturedQrAnchorRect.value = null;
   parsedResult.value = null;
+  paperParseMetrics.value = null;
   errorMessage.value = '';
   cameraWarning.value = '';
+  isAuthExpired.value = false;
   isScanPaused.value = false;
 
   if (isCameraActive.value && !isScanning) {
     isScanning = true;
     scanTickCount = 0;
-    cameraStatus.value = '請將發票 QR Code 置於畫面中並保持約 15～20 公分';
+    cameraStatus.value = '請將發票 QR Code 置於畫面中（約 15～20 公分），或直接點擊下方 AI 辨識';
     scheduleNextScan(SCAN_INTERVAL_MS);
     scheduleBackgroundRefocus();
   }
@@ -906,16 +1062,15 @@ async function stopScanner() {
 
 /**
  * 檢查是否已通過 Cloudflare Access 之 /api/* 存取認證
- * 僅在切入「紙本發票拍照」時執行，確保首頁與電子發票 QR 模式完全免登入。
+ * 僅於使用者主動點擊「✨📷 AI 辨識／補充」按鈕當下呼叫，確保離線掃 QR 完全零 API 請求。
  */
-async function checkPaperAuth() {
+async function checkAiAuth(): Promise<boolean> {
   if (typeof navigator !== 'undefined' && navigator.onLine === false) {
-    paperAuthState.value = 'authenticated';
-    errorMessage.value = '目前處於離線狀態，紙本發票 AI 辨識需要網路連線。';
-    return;
+    errorMessage.value = '目前處於離線狀態，AI 發票辨識需要網路連線。';
+    return false;
   }
 
-  paperAuthState.value = 'checking';
+  aiAuthState.value = 'checking';
   errorMessage.value = '';
   isAuthExpired.value = false;
 
@@ -936,19 +1091,21 @@ async function checkPaperAuth() {
       (response.status >= 300 && response.status < 400) ||
       !contentType.toLowerCase().includes('application/json')
     ) {
-      paperAuthState.value = 'required';
-      return;
+      aiAuthState.value = 'required';
+      return false;
     }
 
     if (response.ok) {
-      paperAuthState.value = 'authenticated';
-      return;
+      aiAuthState.value = 'authenticated';
+      return true;
     }
 
-    paperAuthState.value = 'required';
+    aiAuthState.value = 'required';
+    return false;
   } catch {
     // 跨網域 Access 登入重導向在部分瀏覽器會以 TypeError 呈現，視為尚未完成認證
-    paperAuthState.value = 'required';
+    aiAuthState.value = 'required';
+    return false;
   }
 }
 
@@ -961,7 +1118,7 @@ function handleStartPaperAuth() {
 }
 
 /**
- * 釋放並清空目前拍攝之紙本發票暫存影像 URL（確保 Object URL 記憶體妥善回收）
+ * 釋放並清空目前拍攝之發票暫存影像 URL（確保 Object URL 記憶體妥善回收）
  */
 function releaseCapturedImageUrl() {
   if (capturedObjectUrl && typeof URL !== 'undefined' && typeof URL.revokeObjectURL === 'function') {
@@ -976,50 +1133,91 @@ function releaseCapturedImageUrl() {
 }
 
 /**
- * 切換掃描模式（電子發票 QR Code / 紙本發票拍照辨識）
- * 切換時共用既有相機串流不重開鏡頭，降低延遲與權限干擾。
+ * 對已定格之高解析度靜態快照離線執行雙引擎 QR 探測：
+ * 1. 若尚無 QR 骨架且拍照當下命中電子發票 QR，自動解析補齊 qrParsedResult。
+ * 2. 回傳偵測到之發票 QR 歸一化位置矩形，作為 ReceiptCropper 自動初框的必含錨點。
  */
-function handleSwitchMode(mode: ScanMode) {
-  if (scanMode.value === mode || isAnalyzingPaper.value) return;
+async function detectQrFromSnapshotCanvas(
+  snapshotCanvas: HTMLCanvasElement
+): Promise<NormalizedRect | null> {
+  const hits: DecodedQrHit[] = [];
 
-  scanMode.value = mode;
-  errorMessage.value = '';
-  cameraWarning.value = '';
-  isAuthExpired.value = false;
-  parsedResult.value = null;
-  paperParseMetrics.value = null;
-
-  if (mode === 'paper') {
-    pauseScanningLoop();
-    leftCode.value = '';
-    rightCode.value = '';
-    paperStep.value = 'camera';
-    releaseCapturedImageUrl();
-    cameraStatus.value = isCameraActive.value
-      ? '請將紙本發票置於畫面中，對焦清晰後按下拍照'
-      : '';
-    void checkPaperAuth();
-  } else {
-    paperStep.value = 'camera';
-    releaseCapturedImageUrl();
-    isScanPaused.value = false;
-    if (isCameraActive.value) {
-      isScanning = true;
-      scanTickCount = 0;
-      cameraStatus.value = '請將發票 QR Code 置於畫面中並保持約 15～20 公分';
-      scheduleNextScan(SCAN_INTERVAL_MS);
-      scheduleBackgroundRefocus();
+  if (barcodeDetector) {
+    try {
+      const barcodes = await barcodeDetector.detect(snapshotCanvas);
+      for (const barcode of barcodes) {
+        const text = barcode.rawValue?.trim() || '';
+        if (!text) continue;
+        hits.push({
+          text,
+          rect: computeBarcodeNormalizedRect(
+            barcode.boundingBox,
+            snapshotCanvas.width,
+            snapshotCanvas.height
+          ),
+        });
+      }
+    } catch {
+      // 原生偵測失敗時退回 jsQR
     }
   }
+
+  if (!hits.some((h) => isTaiwanInvoiceQrText(h.text))) {
+    const drawn = drawSourceToOffscreenCanvas(
+      snapshotCanvas,
+      snapshotCanvas.width,
+      snapshotCanvas.height
+    );
+    if (drawn && offscreenCtx) {
+      const jsQrHits = decodeWithJsQrHits(offscreenCtx, drawn.width, drawn.height);
+      hits.push(...jsQrHits);
+    }
+  }
+
+  const invoiceHits = hits.filter((h) => isTaiwanInvoiceQrText(h.text));
+  if (invoiceHits.length === 0) {
+    return null;
+  }
+
+  const leftHit = invoiceHits.find((h) => !h.text.startsWith('**'));
+  const rightHit = invoiceHits.find((h) => h.text.startsWith('**'));
+
+  let codesUpdated = false;
+  if (leftHit && !leftCode.value.trim()) {
+    leftCode.value = leftHit.text;
+    codesUpdated = true;
+  }
+  if (rightHit && !rightCode.value.trim()) {
+    rightCode.value = rightHit.text;
+    codesUpdated = true;
+  }
+
+  if (codesUpdated && leftCode.value.trim()) {
+    parseCurrentCodes({ quiet: true });
+    if (currentDeviceId.value) {
+      saveVerifiedCameraId(currentDeviceId.value);
+    }
+  }
+
+  return mergeNormalizedRects(invoiceHits.map((h) => h.rect));
 }
 
 /**
- * 紙本發票模式：擷取目前相機高解析度影格，優先使用非同步 toBlob + Object URL 以減少卡頓
+ * 點擊「✨📷 AI 辨識／補充」快門按鈕：
+ * 1. 先立即定格高解析度畫面防止認證等待期間手震模糊。
+ * 2. 若尚未確認授權，於進裁切前呼叫 GET /api/auth?check=1 檢核。
+ * 3. 授權通過後於本機對快照跑一次離線 QR 探測，再帶著錨點與 QR 骨架進入正矩形裁切。
  */
-async function handleCapturePaperPhoto() {
-  if (isCapturingPhoto || isAnalyzingPaper.value) return;
+async function handleAiCaptureClick() {
+  if (isPreparingAiCapture.value || isAnalyzingPaper.value) return;
   errorMessage.value = '';
+  cameraWarning.value = '';
   isAuthExpired.value = false;
+
+  if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+    errorMessage.value = '目前處於離線狀態，AI 辨識需要網路連線（電子發票 QR 仍可離線掃描帶入）。';
+    return;
+  }
 
   const video = videoRef.value;
   if (
@@ -1033,30 +1231,43 @@ async function handleCapturePaperPhoto() {
     return;
   }
 
-  const canvas = document.createElement('canvas');
-  canvas.width = video.videoWidth;
-  canvas.height = video.videoHeight;
-  const ctx = canvas.getContext('2d');
-  if (!ctx) {
+  const snapshotCanvas = document.createElement('canvas');
+  snapshotCanvas.width = video.videoWidth;
+  snapshotCanvas.height = video.videoHeight;
+  const snapshotCtx = snapshotCanvas.getContext('2d');
+  if (!snapshotCtx) {
     errorMessage.value = '無法擷取相機畫面，請重試。';
     return;
   }
 
-  isCapturingPhoto = true;
+  // 先定格當前影格，避免授權檢查的短暫等待導致手震
+  snapshotCtx.drawImage(video, 0, 0, snapshotCanvas.width, snapshotCanvas.height);
+
+  isPreparingAiCapture.value = true;
   try {
-    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+    if (aiAuthState.value !== 'authenticated') {
+      const authed = await checkAiAuth();
+      if (!authed || isDisposed) {
+        return;
+      }
+    }
+
+    // 暫停背景 QR 掃描迴圈，保留既有 qrParsedResult 作為混合辨識骨架
+    pauseScanningLoop();
+
+    const detectedAnchor = await detectQrFromSnapshotCanvas(snapshotCanvas);
 
     let nextImageUrl = '';
     let nextObjectUrl = '';
 
     if (
-      typeof canvas.toBlob === 'function' &&
+      typeof snapshotCanvas.toBlob === 'function' &&
       typeof URL !== 'undefined' &&
       typeof URL.createObjectURL === 'function'
     ) {
       const blob = await new Promise<Blob | null>((resolve) => {
         try {
-          canvas.toBlob((res) => resolve(res), 'image/jpeg', 0.9);
+          snapshotCanvas.toBlob((res) => resolve(res), 'image/jpeg', 0.9);
         } catch {
           resolve(null);
         }
@@ -1067,11 +1278,11 @@ async function handleCapturePaperPhoto() {
       }
     }
 
-    if (!nextImageUrl && typeof canvas.toDataURL === 'function') {
-      nextImageUrl = canvas.toDataURL('image/jpeg', 0.9);
+    if (!nextImageUrl && typeof snapshotCanvas.toDataURL === 'function') {
+      nextImageUrl = snapshotCanvas.toDataURL('image/jpeg', 0.9);
     }
 
-    if (isDisposed || scanMode.value !== 'paper') {
+    if (isDisposed) {
       if (nextObjectUrl && typeof URL.revokeObjectURL === 'function') {
         URL.revokeObjectURL(nextObjectUrl);
       }
@@ -1084,46 +1295,58 @@ async function handleCapturePaperPhoto() {
     }
 
     releaseCapturedImageUrl();
+    capturedQrAnchorRect.value = detectedAnchor;
     capturedObjectUrl = nextObjectUrl;
     capturedImageUrl.value = nextImageUrl;
-    parsedResult.value = null;
     paperParseMetrics.value = null;
-    paperStep.value = 'crop';
+    scannerStep.value = 'crop';
   } finally {
-    isCapturingPhoto = false;
+    isPreparingAiCapture.value = false;
   }
 }
 
 /**
- * 紙本發票模式：捨棄目前拍攝畫面，回到即時取景重拍
+ * 捨棄目前拍攝畫面並回到相機畫面重拍；若已有離線 QR 結果則一併保留以便重拍或直接帶入
  */
 function handlePaperRetake() {
   if (isAnalyzingPaper.value) return;
   releaseCapturedImageUrl();
-  parsedResult.value = null;
+  capturedQrAnchorRect.value = null;
   paperParseMetrics.value = null;
   errorMessage.value = '';
   isAuthExpired.value = false;
-  paperStep.value = 'camera';
-  cameraStatus.value = isCameraActive.value
-    ? '請將紙本發票置於畫面中，對焦清晰後按下拍照'
-    : '';
+  scannerStep.value = 'camera';
+
+  if (qrParsedResult.value) {
+    parsedResult.value = qrParsedResult.value;
+    cameraStatus.value =
+      '已保留發票 QR 資訊；請將發票上方店名納入畫面後點擊 AI 辨識補充，或直接帶入表單';
+  } else {
+    parsedResult.value = null;
+    isScanPaused.value = false;
+    if (isCameraActive.value) {
+      isScanning = true;
+      scanTickCount = 0;
+      cameraStatus.value = '請將發票 QR Code 置於畫面中（約 15～20 公分），或直接點擊下方 AI 辨識';
+      scheduleNextScan(SCAN_INTERVAL_MS);
+      scheduleBackgroundRefocus();
+    }
+  }
 }
 
 /**
- * 紙本發票模式：保留已拍攝照片並返回正矩形裁切步驟微調範圍
+ * 保留已拍攝照片並返回正矩形裁切步驟微調範圍
  */
 function handlePaperRecrop() {
   if (isAnalyzingPaper.value || !capturedImageUrl.value) return;
-  parsedResult.value = null;
   paperParseMetrics.value = null;
   errorMessage.value = '';
   isAuthExpired.value = false;
-  paperStep.value = 'crop';
+  scannerStep.value = 'crop';
 }
 
 /**
- * 紙本發票模式：將正矩形裁切並壓縮後之二進位影像以 FormData 送往同源 Worker API 進行 Gemini AI 辨識
+ * 將正矩形裁切並壓縮後之二進位影像（及選填 QR 骨架）以 FormData 送往同源 Worker API 進行 AI 辨識
  */
 async function handlePaperCropConfirm(payload: CroppedImagePayload) {
   if (isAnalyzingPaper.value) return;
@@ -1132,7 +1355,7 @@ async function handlePaperCropConfirm(payload: CroppedImagePayload) {
   paperParseMetrics.value = null;
 
   if (typeof navigator !== 'undefined' && navigator.onLine === false) {
-    errorMessage.value = '目前處於離線狀態，紙本發票 AI 辨識需要網路連線。';
+    errorMessage.value = '目前處於離線狀態，AI 發票辨識需要網路連線。';
     return;
   }
 
@@ -1148,6 +1371,9 @@ async function handlePaperCropConfirm(payload: CroppedImagePayload) {
   formData.append('model', aiSettings.model);
   formData.append('thinkingLevel', aiSettings.thinkingLevel);
   formData.append('mediaResolution', aiSettings.mediaResolution);
+  if (qrParsedResult.value) {
+    formData.append('qrContext', JSON.stringify(qrParsedResult.value));
+  }
 
   isAnalyzingPaper.value = true;
   try {
@@ -1169,7 +1395,7 @@ async function handlePaperCropConfirm(payload: CroppedImagePayload) {
       (response.status >= 300 && response.status < 400) ||
       !responseContentType.toLowerCase().includes('application/json')
     ) {
-      paperAuthState.value = 'required';
+      aiAuthState.value = 'required';
       isAuthExpired.value = true;
       errorMessage.value =
         '尚未完成 Cloudflare 認證或驗證已過期，請點擊下方按鈕前往認證後再試。';
@@ -1222,21 +1448,22 @@ async function handlePaperCropConfirm(payload: CroppedImagePayload) {
       ...data.result,
       source: 'paper',
     };
-    paperStep.value = 'result';
+    scannerStep.value = 'result';
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
-    errorMessage.value = `無法連線至紙本發票辨識服務 (${msg})，請確認網路連線後重試。`;
+    errorMessage.value = `無法連線至 AI 發票辨識服務 (${msg})，請確認網路連線後重試。`;
   } finally {
     isAnalyzingPaper.value = false;
   }
 }
 
 /**
- * 依目前已掃描之左／右 QR Code 內容解析發票資訊
- * 商品分類統一留空，帶入支出表單後再依表單規則處理與驗證。
+ * 依目前已掃描之左／右 QR Code 內容解析發票資訊，同時寫入權威 qrParsedResult 骨架
  */
-function parseCurrentCodes() {
-  errorMessage.value = '';
+function parseCurrentCodes(options?: { quiet?: boolean }) {
+  if (!options?.quiet) {
+    errorMessage.value = '';
+  }
   if (!leftCode.value.trim()) {
     return;
   }
@@ -1250,13 +1477,17 @@ function parseCurrentCodes() {
       }
     }
 
-    parsedResult.value = {
+    const qrResult: ParsedInvoiceResult = {
       ...result,
       source: 'qr',
     };
+    qrParsedResult.value = qrResult;
+    parsedResult.value = qrResult;
   } catch (err: unknown) {
-    errorMessage.value =
-      err instanceof Error ? err.message : (String(err) || '發票解析失敗，請確認 QR Code 格式');
+    if (!options?.quiet) {
+      errorMessage.value =
+        err instanceof Error ? err.message : (String(err) || '發票解析失敗，請確認 QR Code 格式');
+    }
   }
 }
 
@@ -1299,10 +1530,10 @@ onUnmounted(async () => {
 <template>
   <div class="fixed inset-0 bg-slate-900/50 backdrop-blur-sm z-50 flex items-center justify-center p-4" role="dialog" aria-modal="true" aria-labelledby="modal-title">
     <div class="bg-white rounded-2xl max-w-lg w-full p-5 sm:p-6 shadow-xl max-h-[90vh] flex flex-col overflow-hidden">
-      <!-- 標題欄 -->
+      <!-- 標題欄（方案 B+ 單一整合視窗） -->
       <div class="flex items-center justify-between pb-3 border-b border-slate-100">
         <h3 id="modal-title" class="text-lg font-bold text-slate-800">
-          {{ scanMode === 'qr' ? '電子發票掃描' : '紙本發票拍照辨識' }}
+          發票掃描與 AI 辨識
         </h3>
         <button
           type="button"
@@ -1314,48 +1545,10 @@ onUnmounted(async () => {
         </button>
       </div>
 
-      <!-- 模式切換列（電子發票雙 QR / 紙本發票拍照） -->
-      <div class="pt-3">
-        <div class="flex rounded-xl bg-slate-100 p-1" role="tablist" aria-label="發票掃描模式">
-          <button
-            type="button"
-            role="tab"
-            data-testid="mode-qr-btn"
-            :aria-selected="scanMode === 'qr'"
-            :disabled="isAnalyzingPaper"
-            class="flex-1 py-1.5 text-xs font-bold rounded-lg transition-all"
-            :class="
-              scanMode === 'qr'
-                ? 'bg-white text-teal-700 shadow-xs'
-                : 'text-slate-500 hover:text-slate-800'
-            "
-            @click="handleSwitchMode('qr')"
-          >
-            電子發票 QR
-          </button>
-          <button
-            type="button"
-            role="tab"
-            data-testid="mode-paper-btn"
-            :aria-selected="scanMode === 'paper'"
-            :disabled="isAnalyzingPaper"
-            class="flex-1 py-1.5 text-xs font-bold rounded-lg transition-all"
-            :class="
-              scanMode === 'paper'
-                ? 'bg-white text-teal-700 shadow-xs'
-                : 'text-slate-500 hover:text-slate-800'
-            "
-            @click="handleSwitchMode('paper')"
-          >
-            紙本發票拍照
-          </button>
-        </div>
-      </div>
-
       <!-- 內容區 -->
       <div class="py-3 space-y-3 overflow-y-auto flex-1">
-        <!-- 相機預覽容器（QR 模式全程顯示；紙本模式於 camera 階段顯示，以 v-show 保持串流不斷線） -->
-        <div v-show="scanMode === 'qr' || paperStep === 'camera'" class="space-y-2">
+        <!-- 相機預覽容器（預設純離線即時掃描 QR，並提供單顆 AI 辨識快門按鈕） -->
+        <div v-show="scannerStep === 'camera'" class="space-y-2.5">
           <div v-if="cameraStatus" class="text-xs text-teal-600 font-medium">
             {{ cameraStatus }}
           </div>
@@ -1394,8 +1587,8 @@ onUnmounted(async () => {
             </div>
           </div>
 
-          <!-- 電子發票模式：左／右雙碼掃描進度與重新掃描按鈕 -->
-          <div v-if="scanMode === 'qr'" class="flex items-center justify-between gap-2 text-[11px]">
+          <!-- 左／右雙碼掃描進度與重新掃描按鈕 -->
+          <div class="flex items-center justify-between gap-2 text-[11px]">
             <div class="flex items-center gap-2">
               <span
                 class="px-2 py-0.5 rounded-full font-medium"
@@ -1423,26 +1616,26 @@ onUnmounted(async () => {
             </button>
           </div>
 
-          <!-- 紙本發票模式：先確認 AI 認證狀態，已認證才顯示拍照快門（不提供相簿上傳） -->
-          <div v-else class="space-y-2 pt-1">
+          <!-- AI 辨識／補充快門與按需 Cloudflare 授權區域（點按 AI 按鈕才進行檢查） -->
+          <div class="space-y-2 pt-0.5">
             <div
-              v-if="paperAuthState === 'checking'"
-              class="w-full py-3 px-4 bg-slate-50 border border-slate-200 rounded-xl text-xs text-slate-600 text-center font-medium"
+              v-if="aiAuthState === 'checking'"
+              class="w-full py-2.5 px-4 bg-slate-50 border border-slate-200 rounded-xl text-xs text-slate-600 text-center font-medium"
             >
-              正在確認 AI 辨識認證狀態...
+              正在確認 AI 辨識授權狀態...
             </div>
 
             <div
-              v-else-if="paperAuthState === 'required'"
+              v-else-if="aiAuthState === 'required'"
               data-testid="paper-auth-prompt"
               class="p-3.5 bg-teal-50 border border-teal-200 rounded-xl space-y-2.5 text-center"
             >
               <div class="flex items-center justify-center gap-1.5 text-xs font-bold text-teal-900">
                 <ShieldCheck class="w-4 h-4 text-teal-600" />
-                <span>啟用 AI 紙本發票辨識前需先完成認證</span>
+                <span>啟用 AI 辨識前需先完成 Cloudflare 認證</span>
               </div>
               <p class="text-[11px] text-teal-800/80 leading-relaxed">
-                一般記帳與電子發票掃描皆免登入；認證通過後 1 個月內使用紙本發票辨識皆不需重複登入。
+                一般記帳與電子發票 QR 掃描皆免登入；認證通過後 1 個月內使用 AI 辨識皆不需重複登入。
               </p>
               <button
                 type="button"
@@ -1457,16 +1650,19 @@ onUnmounted(async () => {
             <template v-else>
               <button
                 type="button"
-                data-testid="capture-paper-btn"
-                :disabled="!isCameraActive"
-                class="w-full py-2.5 px-4 bg-teal-600 hover:bg-teal-700 active:scale-[0.99] text-white font-bold text-sm rounded-xl shadow-xs transition flex items-center justify-center gap-2 disabled:opacity-50"
-                @click="handleCapturePaperPhoto"
+                data-testid="ai-capture-btn"
+                :disabled="!isCameraActive || isPreparingAiCapture || isAnalyzingPaper"
+                class="w-full py-2.5 px-4 bg-teal-600 hover:bg-teal-700 active:scale-[0.99] text-white font-bold text-sm rounded-xl shadow-xs transition flex items-center justify-center gap-1.5 disabled:opacity-50"
+                @click="handleAiCaptureClick"
               >
-                <Camera class="w-4 h-4" />
-                <span>拍照並框選範圍</span>
+                <span>{{ aiButtonLabel }}</span>
               </button>
-              <p class="text-[11px] text-slate-400 text-center">
-                拍照後可先以正矩形裁切發票文字區域，再送交 Gemini AI 辨識（請避開完整卡號等個資）
+              <p class="text-[11px] text-slate-400 text-center leading-relaxed">
+                {{
+                  qrParsedResult
+                    ? '可直接點下方「帶入表單」；若要 AI 補店名與分類，請將發票上方店名納入畫面後點擊'
+                    : '傳統紙本發票或要識別電子發票店家名稱，請將整張發票納入畫面後點擊（請避開卡號個資）'
+                }}
               </p>
             </template>
           </div>
@@ -1482,18 +1678,20 @@ onUnmounted(async () => {
           </div>
         </div>
 
-        <!-- 紙本發票模式：正矩形框選裁切步驟 -->
+        <!-- 正矩形框選裁切步驟（自動定位初框＋QR 錨點提示） -->
         <ReceiptCropper
-          v-if="scanMode === 'paper' && paperStep === 'crop' && capturedImageUrl"
+          v-if="scannerStep === 'crop' && capturedImageUrl"
           :image-data-url="capturedImageUrl"
           :is-submitting="isAnalyzingPaper"
+          :anchor-rect="capturedQrAnchorRect"
+          :qr-hint-text="cropperQrHintText"
           @retake="handlePaperRetake"
           @confirm="handlePaperCropConfirm"
         />
 
-        <!-- 紙本發票模式：辨識完成後之快速重拍／重新裁切操作列 -->
+        <!-- AI 辨識完成後之快速重拍／重新裁切操作列 -->
         <div
-          v-if="scanMode === 'paper' && paperStep === 'result'"
+          v-if="scannerStep === 'result'"
           class="flex items-center justify-between gap-2 text-xs"
         >
           <span class="text-teal-700 font-semibold">AI 辨識完成，請核對後帶入表單</span>
@@ -1532,8 +1730,8 @@ onUnmounted(async () => {
           </button>
         </div>
 
-        <!-- 解析預覽結果（緊鄰相機或裁切區下方，辨識完成即可確認並帶入表單） -->
-        <div v-if="parsedResult" class="bg-teal-50 border border-teal-200 rounded-xl p-3 space-y-2.5">
+        <!-- 解析預覽結果（於相機頁掃到 QR 或 AI 辨識完成時顯示；裁切頁隱藏以留出最大操作空間） -->
+        <div v-if="parsedResult && scannerStep !== 'crop'" class="bg-teal-50 border border-teal-200 rounded-xl p-3 space-y-2.5">
           <div v-if="parsedResult.merchant" class="text-xs text-teal-950 font-bold">
             店家名稱：{{ parsedResult.merchant }}
           </div>
@@ -1627,7 +1825,7 @@ onUnmounted(async () => {
           取消
         </button>
         <button
-          v-if="parsedResult"
+          v-if="parsedResult && scannerStep !== 'crop'"
           type="button"
           class="px-4 py-2 text-sm bg-teal-600 text-white hover:bg-teal-700 rounded-lg shadow-sm"
           @click="handleApply"

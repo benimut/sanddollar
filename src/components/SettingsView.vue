@@ -554,6 +554,55 @@ function handleAiSettingsChange() {
   showAiSavedFeedback();
 }
 
+/** 是否正在檢查 Cloudflare 授權登入狀態 */
+const isCheckingLogout = ref(false);
+/** Cloudflare 登出操作提示訊息 */
+const cloudflareLogoutMessage = ref('');
+
+/**
+ * 動態檢查目前是否已通過 Cloudflare Access 授權；若已授權則導向動態登出端點（不影響本機記帳資料）
+ */
+async function handleCloudflareLogout() {
+  if (isCheckingLogout.value) return;
+  cloudflareLogoutMessage.value = '';
+
+  if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+    cloudflareLogoutMessage.value = '目前處於離線狀態，無法聯絡 Cloudflare 登出服務。';
+    return;
+  }
+
+  isCheckingLogout.value = true;
+  try {
+    const response = await fetch('/api/auth?check=1', {
+      method: 'GET',
+      credentials: 'same-origin',
+      redirect: 'manual',
+      cache: 'no-store',
+    });
+
+    const contentType = response.headers.get('content-type') || '';
+    if (
+      response.type === 'opaqueredirect' ||
+      response.redirected ||
+      response.status === 401 ||
+      response.status === 403 ||
+      (response.status >= 300 && response.status < 400) ||
+      !contentType.toLowerCase().includes('application/json') ||
+      !response.ok
+    ) {
+      cloudflareLogoutMessage.value = '目前此裝置尚未授權登入 Cloudflare，無需登出。';
+      return;
+    }
+
+    const returnTo = `${window.location.pathname}${window.location.search}` || '/';
+    window.location.assign(`/api/auth?logout=1&returnTo=${encodeURIComponent(returnTo)}`);
+  } catch {
+    cloudflareLogoutMessage.value = '目前此裝置尚未授權登入 Cloudflare，無需登出。';
+  } finally {
+    isCheckingLogout.value = false;
+  }
+}
+
 // ==================== 資料初始化 ====================
 async function loadAllData() {
   await Promise.all([
@@ -866,6 +915,31 @@ onUnmounted(() => {
             {{ selectedResolutionOption?.description }}
           </p>
         </div>
+      </div>
+
+      <!-- Cloudflare Access 授權管理（僅清除授權 Cookie，不動本機記帳資料） -->
+      <div class="pt-3 border-t border-slate-100 space-y-2">
+        <div class="flex items-center justify-between gap-2">
+          <p class="text-[11px] text-slate-500 leading-relaxed">
+            登出僅清除 Cloudflare AI 授權 Cookie，不會影響本機記帳與設定資料。
+          </p>
+          <button
+            id="btn-cloudflare-logout"
+            type="button"
+            :disabled="isCheckingLogout"
+            class="px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 font-semibold text-xs rounded-xl transition-colors shrink-0 disabled:opacity-50"
+            @click="handleCloudflareLogout"
+          >
+            {{ isCheckingLogout ? '檢查授權狀態中...' : '登出 Cloudflare 授權' }}
+          </button>
+        </div>
+        <p
+          v-if="cloudflareLogoutMessage"
+          data-testid="cloudflare-logout-message"
+          class="text-[11px] text-slate-600 font-medium"
+        >
+          {{ cloudflareLogoutMessage }}
+        </p>
       </div>
     </section>
 

@@ -38,9 +38,19 @@ interface ParseInvoiceJsonBody {
   imageBase64?: unknown;
   mimeType?: unknown;
   categories?: unknown;
+  qrContext?: unknown;
   model?: unknown;
   thinkingLevel?: unknown;
   mediaResolution?: unknown;
+}
+
+/** 前端由電子發票 QR Code 離線預先解出之結構化上下文 */
+interface ParsedQrContext {
+  invoiceNumber: string;
+  date: string;
+  randomCode: string;
+  totalAmount: number;
+  items: NormalizedInvoiceItem[];
 }
 
 /** 解析後統一之發票請求輸入結構 */
@@ -49,6 +59,7 @@ interface ExtractedInvoiceRequest {
   mimeType: SupportedImageMimeType;
   imageBytes: number;
   categories: string[];
+  qrContext: ParsedQrContext | null;
   model: SupportedModelId;
   thinkingLevel: ThinkingLevel;
   mediaResolution: MediaResolution;
@@ -328,6 +339,68 @@ function sanitizeCategories(raw: unknown): string[] {
 }
 
 /**
+ * 驗證並正規化前端傳入之電子發票 QR Code 上下文資料
+ * 若缺乏有效發票號碼、總金額或品項則回傳 null，視為純紙本模式。
+ */
+function sanitizeQrContext(raw: unknown): ParsedQrContext | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const obj = raw as Record<string, unknown>;
+
+  const invoiceNumber = normalizeInvoiceNumber(obj.invoiceNumber);
+  const date = normalizeValidDate(obj.date);
+  const randomCode = normalizeRandomCode(obj.randomCode);
+  const parsedTotal = Number(obj.totalAmount);
+  const totalAmount =
+    Number.isFinite(parsedTotal) && parsedTotal > 0 ? Math.round(parsedTotal) : 0;
+
+  const items: NormalizedInvoiceItem[] = [];
+  if (Array.isArray(obj.items)) {
+    for (const entry of obj.items) {
+      if (!entry || typeof entry !== 'object') continue;
+      const itemObj = entry as Record<string, unknown>;
+      const name = typeof itemObj.name === 'string' ? itemObj.name.trim().slice(0, 80) : '';
+      if (!name) continue;
+
+      const parsedQty = Number(itemObj.quantity);
+      const quantity = Number.isFinite(parsedQty) && parsedQty > 0 ? parsedQty : 1;
+      const parsedUnitPrice = Number(itemObj.unitPrice);
+      const parsedSubtotal = Number(itemObj.subtotal);
+      let unitPrice =
+        Number.isFinite(parsedUnitPrice) && parsedUnitPrice >= 0 ? parsedUnitPrice : 0;
+      const subtotal =
+        Number.isFinite(parsedSubtotal) && parsedSubtotal >= 0
+          ? Math.round(parsedSubtotal)
+          : Math.round(quantity * unitPrice);
+
+      if (unitPrice === 0 && subtotal > 0 && quantity > 0) {
+        unitPrice = Math.round((subtotal / quantity) * 100) / 100;
+      }
+
+      items.push({
+        name,
+        quantity,
+        unitPrice,
+        subtotal,
+        category: '',
+      });
+      if (items.length >= 40) break;
+    }
+  }
+
+  if (!invoiceNumber && totalAmount <= 0 && items.length === 0) {
+    return null;
+  }
+
+  return {
+    invoiceNumber,
+    date,
+    randomCode,
+    totalAmount,
+    items,
+  };
+}
+
+/**
  * 解析來自 multipart/form-data 或 application/json 的發票辨識請求內容
  */
 async function extractParseInvoiceRequest(
@@ -405,6 +478,16 @@ async function extractParseInvoiceRequest(
       }
     }
 
+    let rawQrContext: unknown = null;
+    const qrContextEntry = formData.get('qrContext');
+    if (typeof qrContextEntry === 'string' && qrContextEntry.trim()) {
+      try {
+        rawQrContext = JSON.parse(qrContextEntry);
+      } catch {
+        rawQrContext = null;
+      }
+    }
+
     const buffer = await imageBlob.arrayBuffer();
     const imageBase64 = arrayBufferToBase64(buffer);
     const { model, thinkingLevel, mediaResolution } = sanitizeAiParams(
@@ -420,6 +503,7 @@ async function extractParseInvoiceRequest(
         mimeType: rawMime as SupportedImageMimeType,
         imageBytes: imageBlob.size,
         categories: sanitizeCategories(rawCategories),
+        qrContext: sanitizeQrContext(rawQrContext),
         model,
         thinkingLevel,
         mediaResolution,
@@ -492,6 +576,7 @@ async function extractParseInvoiceRequest(
         mimeType: mimeType as SupportedImageMimeType,
         imageBytes: Math.floor((imageBase64.length * 3) / 4),
         categories: sanitizeCategories(body.categories),
+        qrContext: sanitizeQrContext(body.qrContext),
         model,
         thinkingLevel,
         mediaResolution,
@@ -553,20 +638,26 @@ function normalizeRandomCode(raw: unknown): string {
 
 /**
  * 將模型回傳的原始物件做嚴格型別防禦與正規化，確保符合前端契約
+ * 當提供 QR Code 精準上下文時，以 QR 的發票號碼、日期、隨機碼與總金額作為權威保底覆寫，杜絕 OCR 數字錯字。
  */
 function normalizeModelOutput(
   raw: Record<string, unknown>,
-  allowedCategories: string[]
+  allowedCategories: string[],
+  qrContext?: ParsedQrContext | null
 ): NormalizedPaperInvoiceResult {
   const categorySet = new Set(allowedCategories);
 
   const merchant = typeof raw.merchant === 'string' ? raw.merchant.trim() : '';
-  const invoiceNumber = normalizeInvoiceNumber(raw.invoiceNumber);
-  const date = normalizeValidDate(raw.date);
-  const randomCode = normalizeRandomCode(raw.randomCode);
+  const modelInvoiceNumber = normalizeInvoiceNumber(raw.invoiceNumber);
+  const modelDate = normalizeValidDate(raw.date);
+  const modelRandomCode = normalizeRandomCode(raw.randomCode);
+
+  const invoiceNumber = qrContext?.invoiceNumber || modelInvoiceNumber;
+  const date = qrContext?.date || modelDate;
+  const randomCode = qrContext?.randomCode || modelRandomCode;
 
   const rawItems = Array.isArray(raw.items) ? raw.items : [];
-  const items: NormalizedInvoiceItem[] = [];
+  const parsedItems: NormalizedInvoiceItem[] = [];
 
   for (const entry of rawItems) {
     if (!entry || typeof entry !== 'object') continue;
@@ -593,7 +684,7 @@ function normalizeModelOutput(
     const rawCat = typeof obj.category === 'string' ? obj.category.trim() : '';
     const category = categorySet.has(rawCat) ? rawCat : '';
 
-    items.push({
+    parsedItems.push({
       name,
       quantity,
       unitPrice,
@@ -601,6 +692,12 @@ function normalizeModelOutput(
       category,
     });
   }
+
+  // 若 QR 原有明確品項而模型未回傳任何明細時，保底沿用 QR 既有品項確保不遺失明細
+  const items =
+    qrContext && qrContext.items.length > 0 && parsedItems.length === 0
+      ? qrContext.items
+      : parsedItems;
 
   const rawDiscounts = Array.isArray(raw.discounts) ? raw.discounts : [];
   const discounts: NormalizedInvoiceDiscount[] = [];
@@ -631,10 +728,12 @@ function normalizeModelOutput(
     items.reduce((sum, it) => sum + it.subtotal, 0) -
       discounts.reduce((sum, d) => sum + d.amount, 0)
   );
-  const totalAmount =
+  const modelTotalAmount =
     Number.isFinite(parsedTotal) && parsedTotal > 0
       ? Math.round(parsedTotal)
       : Math.round(computedFallbackTotal);
+  const totalAmount =
+    qrContext && qrContext.totalAmount > 0 ? qrContext.totalAmount : modelTotalAmount;
 
   return {
     merchant,
@@ -650,12 +749,40 @@ function normalizeModelOutput(
 
 /**
  * 建構提供予 Gemini 模型之精簡繁體中文發票解析指令
+ * 若附帶電子發票 QR 上下文，切換為「QR 混合補強指令」由模型專注補出店家名稱、分類與缺漏明細折扣。
  */
-function buildPromptText(categories: string[]): string {
+function buildPromptText(categories: string[], qrContext?: ParsedQrContext | null): string {
   const categoryGuide =
     categories.length > 0
       ? `支出分類清單：[${categories.map((c) => `"${c}"`).join(', ')}]，僅挑選完全一致字串，無合適則填 ""。`
       : '未提供分類清單，category 欄位一律填 ""。';
+
+  if (qrContext) {
+    const qrFacts: string[] = [];
+    if (qrContext.invoiceNumber) qrFacts.push(`發票號碼=${qrContext.invoiceNumber}`);
+    if (qrContext.date) qrFacts.push(`日期=${qrContext.date}`);
+    if (qrContext.randomCode) qrFacts.push(`隨機碼=${qrContext.randomCode}`);
+    if (qrContext.totalAmount > 0) qrFacts.push(`總金額=${qrContext.totalAmount}`);
+
+    const qrItemsSummary =
+      qrContext.items.length > 0
+        ? `QR已解出品項：\n${qrContext.items
+            .map((it) => `- ${it.name} × ${it.quantity} (單價 ${it.unitPrice}, 小計 ${it.subtotal})`)
+            .join('\n')}`
+        : 'QR未含商品明細（純金額碼或明細缺漏）。';
+
+    return [
+      '以下提供同一張台灣電子發票的「已離線解出 QR 權威資訊」與實拍照片，請結合兩者嚴格依 JSON Schema 輸出：',
+      `已知 QR 欄位：${qrFacts.join('、') || '無'}`,
+      qrItemsSummary,
+      '規則如下：',
+      '1. merchant：從照片上方或標題處辨識實際印出的店家／商號文字（含門市別），勿猜測杜撰，看不到填 ""。',
+      '2. invoiceNumber / date / randomCode / totalAmount：一律沿用上方已知 QR 權威數值（無者依圖片補上）。',
+      '3. items：若上方 QR 已有完整品項且照片沒有多出未列明細，請保留 QR 既有品項與金額並依分類清單補填 category；若照片下方連印交易明細且 QR 未包含或缺漏，請從照片補齊品項與分類；若 QR 無品項且照片亦無印明細，items 輸出空陣列 [] 勿杜撰。',
+      '4. discounts：若照片交易明細有獨立折扣、滿額折或點數折抵，請拆至此處並填正數 amount（無名稱填 ""，勿補字）。',
+      `5. category：${categoryGuide}`,
+    ].join('\n');
+  }
 
   return [
     '辨識台灣紙本發票或收據照片，嚴格依 JSON Schema 輸出：',
@@ -798,6 +925,7 @@ async function handleParseInvoice(request: Request, env: Env): Promise<Response>
     mimeType,
     imageBytes,
     categories,
+    qrContext,
     model,
     thinkingLevel,
     mediaResolution,
@@ -817,12 +945,12 @@ async function handleParseInvoice(request: Request, env: Env): Promise<Response>
         model,
         store: false,
         system_instruction:
-          '你是專精台灣紙本發票與收據辨識的記帳助理，只根據圖片實際內容輸出嚴格合法 JSON，絕不杜撰不存在資訊。',
+          '你是專精台灣發票與收據辨識的記帳助理，只根據圖片與已知權威資訊輸出嚴格合法 JSON，絕不杜撰不存在資訊。',
         generation_config: {
           thinking_level: thinkingLevel,
         },
         input: [
-          { type: 'text', text: buildPromptText(categories) },
+          { type: 'text', text: buildPromptText(categories, qrContext) },
           {
             type: 'image',
             data: imageBase64,
@@ -867,7 +995,7 @@ async function handleParseInvoice(request: Request, env: Env): Promise<Response>
       return jsonResponse({ error: 'AI 回傳格式異常，請重新辨識。' }, 502);
     }
 
-    const result = normalizeModelOutput(parsedJson, categories);
+    const result = normalizeModelOutput(parsedJson, categories, qrContext);
     const workerDurationMs = Math.max(0, Math.round(performance.now() - reqStartMs));
     const meta: ParseInvoiceMeta = {
       model,
@@ -895,9 +1023,42 @@ async function handleParseInvoice(request: Request, env: Env): Promise<Response>
 }
 
 /**
- * 處理 AI 認證檢查與登入導回端點 (GET /api/auth)
+ * 從 Cloudflare Access 傳入之 Cf-Access-Jwt-Assertion 標頭動態解析帳號 Team Domain (iss)
+ * 嚴格檢核網域格式為 https://<team-name>.cloudflareaccess.com，避免寫死網址或 Open Redirect。
+ */
+function extractAccessTeamDomain(request: Request): string | null {
+  const jwt = request.headers.get('cf-access-jwt-assertion');
+  if (!jwt) return null;
+
+  const segments = jwt.split('.');
+  if (segments.length < 2 || !segments[1]) return null;
+
+  try {
+    const base64 = segments[1].replace(/-/g, '+').replace(/_/g, '/');
+    const padded = base64.padEnd(Math.ceil(base64.length / 4) * 4, '=');
+    const binary = atob(padded);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) {
+      bytes[i] = binary.charCodeAt(i);
+    }
+    const payload = JSON.parse(new TextDecoder().decode(bytes)) as { iss?: unknown };
+    if (typeof payload.iss !== 'string') return null;
+
+    const candidate = payload.iss.trim().replace(/\/+$/, '');
+    if (/^https:\/\/[a-z0-9-]+\.cloudflareaccess\.com$/i.test(candidate)) {
+      return candidate.toLowerCase();
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 處理 AI 認證檢查、動態登出與登入導回端點 (GET /api/auth)
  * 由於位於受 Cloudflare Access 保護之 /api/* 路徑下：
  * - ?check=1：能到達 Worker 即代表已通過 Access 認證，回傳 200 JSON。
+ * - ?logout=1：動態讀取 JWT 之 Team Domain 並清除本站 Cookie，302 導向全域登出後返回站內。
  * - 一般瀏覽器導向：完成 Cloudflare Access 驗證後安全導回站內頁面（預設首頁 /）。
  */
 function handleAuthEndpoint(request: Request, url: URL): Response {
@@ -914,6 +1075,32 @@ function handleAuthEndpoint(request: Request, url: URL): Response {
   const safeReturnTo =
     rawReturnTo.startsWith('/') && !rawReturnTo.startsWith('//') ? rawReturnTo : '/';
   const redirectTarget = new URL(safeReturnTo, url.origin).toString();
+
+  if (url.searchParams.get('logout') === '1') {
+    const teamDomain = extractAccessTeamDomain(request);
+    const logoutTarget = teamDomain
+      ? `${teamDomain}/cdn-cgi/access/logout?returnTo=${encodeURIComponent(redirectTarget)}`
+      : redirectTarget;
+
+    const headers = new Headers({
+      Location: logoutTarget,
+      'Cache-Control': 'no-store',
+    });
+    // 立即刪除本站之 Access App Cookie（不影響瀏覽器 IndexedDB 本機記帳資料）
+    headers.append(
+      'Set-Cookie',
+      'CF_Authorization=; Path=/; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT; Secure; HttpOnly; SameSite=Lax'
+    );
+    headers.append(
+      'Set-Cookie',
+      'CF_AppSession=; Path=/; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT; Secure; HttpOnly; SameSite=Lax'
+    );
+
+    return new Response(null, {
+      status: 302,
+      headers,
+    });
+  }
 
   return new Response(null, {
     status: 302,

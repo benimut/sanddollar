@@ -243,12 +243,18 @@ describe('InvoiceScannerModal 電子發票相機掃描驗證套件', () => {
     }
     (window as unknown as { BarcodeDetector: unknown }).BarcodeDetector = MockBarcodeDetector;
 
+    const fetchSpy = vi.fn();
+    vi.stubGlobal('fetch', fetchSpy);
+
     const mediaMocks = setupVideoAndCanvasMocks(1920, 1080);
     const { container, emittedEvents, cleanup } = mountModal();
 
     try {
       // 等待開流穩定延遲 (250ms) + 首次掃描
       await flushAsyncWork(360);
+
+      // 離線掃描電子發票 QR 全程嚴禁發送任何 /api/* 認證或辨識請求
+      expect(fetchSpy).not.toHaveBeenCalled();
 
       expect(getUserMedia).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -299,6 +305,7 @@ describe('InvoiceScannerModal 電子發票相機掃描驗證套件', () => {
     } finally {
       cleanup();
       mediaMocks.restore();
+      vi.unstubAllGlobals();
     }
 
     expect(stopTrack).toHaveBeenCalled();
@@ -496,7 +503,7 @@ describe('InvoiceScannerModal 電子發票相機掃描驗證套件', () => {
     }
   });
 
-  it('紙本發票拍照模式應讀取設定頁 AI 參數、以 FormData 二進位上傳並顯示實測效能摘要', async () => {
+  it('未授權狀態下純開啟彈窗絕不發送 API 請求，僅在點擊 ✨📷 AI 辨識當下才檢查授權且不誤進裁切頁', async () => {
     const { stream } = createMockCameraStream();
     Object.defineProperty(navigator, 'mediaDevices', {
       value: {
@@ -505,6 +512,65 @@ describe('InvoiceScannerModal 電子發票相機掃描驗證套件', () => {
       },
       configurable: true,
     });
+
+    const fetchMock = vi.fn().mockResolvedValue({
+      type: 'opaqueredirect',
+      redirected: false,
+      status: 302,
+      ok: false,
+      headers: new Headers(),
+    } as Response);
+    vi.stubGlobal('fetch', fetchMock);
+
+    const mediaMocks = setupVideoAndCanvasMocks(1280, 720);
+    const { container, cleanup } = mountModal({ categories: ['餐飲'] });
+
+    try {
+      await flushAsyncWork(80);
+
+      // 未按下 AI 辨識前不應發送任何請求，也不應顯示認證卡
+      expect(fetchMock).not.toHaveBeenCalled();
+      expect(container.querySelector('[data-testid="paper-auth-prompt"]')).toBeNull();
+
+      const aiBtn = container.querySelector('[data-testid="ai-capture-btn"]') as HTMLButtonElement;
+      expect(aiBtn).not.toBeNull();
+      expect(aiBtn.textContent).toContain('✨📷 AI 辨識');
+
+      // 點擊 AI 按鈕當下才觸發 /api/auth?check=1
+      aiBtn.click();
+      await flushAsyncWork(60);
+
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(String(fetchMock.mock.calls[0][0])).toContain('/api/auth?check=1');
+      expect(container.querySelector('[data-testid="paper-auth-prompt"]')).not.toBeNull();
+      expect(container.querySelector('[data-testid="receipt-cropper"]')).toBeNull();
+    } finally {
+      cleanup();
+      mediaMocks.restore();
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('先掃出電子發票 QR 應顯示 ✨📷 AI 辨識補充，授權通過後以 FormData 連同 qrContext 上傳並顯示花費成本摘要', async () => {
+    const { stream } = createMockCameraStream();
+    Object.defineProperty(navigator, 'mediaDevices', {
+      value: {
+        getUserMedia: vi.fn().mockResolvedValue(stream),
+        enumerateDevices: vi.fn().mockResolvedValue([]),
+      },
+      configurable: true,
+    });
+
+    class MockBarcodeDetector {
+      static getSupportedFormats = vi.fn().mockResolvedValue(['qr_code']);
+      detect = vi.fn().mockResolvedValue([
+        {
+          rawValue: `${BASE_LEFT_77}:**:無糖綠茶:1:35`,
+          boundingBox: { x: 400, y: 780, width: 260, height: 260 },
+        },
+      ]);
+    }
+    (window as unknown as { BarcodeDetector: unknown }).BarcodeDetector = MockBarcodeDetector;
 
     window.localStorage.setItem(
       'sanddollar_ai_invoice_settings',
@@ -534,15 +600,15 @@ describe('InvoiceScannerModal 電子發票相機掃描驗證套件', () => {
             result: {
               merchant: '全聯福利中心',
               invoiceNumber: 'AB12345678',
-              date: '2026-11-21',
-              randomCode: '8492',
-              totalAmount: 89,
+              date: '2024-05-20',
+              randomCode: '8888',
+              totalAmount: 200,
               items: [
                 {
-                  name: '全脂鮮乳',
+                  name: '無糖綠茶',
                   quantity: 1,
-                  unitPrice: 89,
-                  subtotal: 89,
+                  unitPrice: 35,
+                  subtotal: 35,
                   category: '餐飲',
                 },
               ],
@@ -584,26 +650,28 @@ describe('InvoiceScannerModal 電子發票相機掃描驗證套件', () => {
       configurable: true,
     });
 
-    const mediaMocks = setupVideoAndCanvasMocks(1280, 720);
+    const mediaMocks = setupVideoAndCanvasMocks(1280, 1920);
     const { container, cleanup } = mountModal({ categories: ['餐飲', '生活'] });
 
     try {
-      await flushAsyncWork(80);
+      // 等待離線 QR 掃描出結果
+      await flushAsyncWork(360);
 
-      // 切換至紙本發票拍照模式
-      const paperTabBtn = container.querySelector('[data-testid="mode-paper-btn"]') as HTMLButtonElement;
-      paperTabBtn.click();
-      await flushAsyncWork(60);
+      expect(fetchMock, '離線掃出 QR 時仍不得呼叫任何 API').not.toHaveBeenCalled();
 
+      const aiBtn = container.querySelector('[data-testid="ai-capture-btn"]') as HTMLButtonElement;
+      expect(aiBtn).not.toBeNull();
+      expect(aiBtn.textContent).toContain('✨📷 AI 辨識補充');
       expect(container.querySelector('select'), '掃描彈窗應保持極簡，不應出現選單').toBeNull();
 
-      // 按下拍照並等待非同步 toBlob
-      const captureBtn = container.querySelector('[data-testid="capture-paper-btn"]') as HTMLButtonElement;
-      expect(captureBtn).not.toBeNull();
-      captureBtn.click();
+      // 按下「✨📷 AI 辨識補充」才檢查授權並進裁切
+      aiBtn.click();
       await flushAsyncWork(60);
 
       expect(createObjectURLSpy).toHaveBeenCalled();
+      expect(container.querySelector('[data-testid="cropper-qr-hint"]')?.textContent).toContain(
+        'AB12345678'
+      );
 
       // 模擬 ReceiptCropper 圖片載入完成，解鎖確認裁切按鈕
       const cropImg = container.querySelector('[data-testid="receipt-cropper"] img') as HTMLImageElement;
@@ -629,12 +697,17 @@ describe('InvoiceScannerModal 電子發票相機掃描驗證套件', () => {
       expect(sentForm.get('thinkingLevel')).toBe('low');
       expect(sentForm.get('mediaResolution')).toBe('medium');
 
+      const sentQrContextRaw = sentForm.get('qrContext');
+      expect(typeof sentQrContextRaw).toBe('string');
+      const sentQrContext = JSON.parse(String(sentQrContextRaw)) as ParsedInvoiceResult;
+      expect(sentQrContext.invoiceNumber).toBe('AB12345678');
+
       const metricsEl = container.querySelector('[data-testid="paper-parse-metrics"]');
-      expect(metricsEl, '辨識結果預覽區應顯示實測效能摘要').not.toBeNull();
+      expect(metricsEl, '辨識結果預覽區應顯示實測效能與花費成本摘要').not.toBeNull();
       expect(metricsEl?.textContent).toContain('gemini-3.8-flash');
       expect(metricsEl?.textContent).toContain('AI 1.2s');
       expect(metricsEl?.textContent).toContain('12 KB');
-      expect(metricsEl?.textContent).toContain('輸 610 / 思 12 / 出 140 tok');
+      expect(metricsEl?.textContent).toContain('花費成本：輸入 610 / 思考 12 / 輸出 140 token');
     } finally {
       cleanup();
       mediaMocks.restore();

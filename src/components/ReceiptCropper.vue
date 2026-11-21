@@ -11,6 +11,10 @@
 
 import { ref, computed } from 'vue';
 import { Maximize2, RotateCcw, Sparkles } from 'lucide-vue-next';
+import {
+  detectReceiptBoundsFromImage,
+  type NormalizedRect,
+} from '@/utils/receiptAutoCrop';
 
 /** 裁切並壓縮完成後輸出之影像資料 */
 export interface CroppedImagePayload {
@@ -24,14 +28,6 @@ export interface CroppedImagePayload {
   height: number;
   /** 二進位影像位元組數 */
   sizeBytes: number;
-}
-
-/** 歸一化正矩形裁切框座標（數值皆介於 0～1） */
-interface NormalizedRect {
-  x: number;
-  y: number;
-  width: number;
-  height: number;
 }
 
 /** 支援之拖曳操作類型（平移或八方向縮放，嚴格正矩形不旋轉） */
@@ -48,13 +44,19 @@ const OUTPUT_JPEG_QUALITY = 0.78;
 
 const props = withDefaults(
   defineProps<{
-    /** 拍攝取得之原始圖片 Data URL */
+    /** 拍攝取得之原始圖片 URL（Object URL 或 Data URL） */
     imageDataUrl: string;
     /** 是否正在送出辨識中（鎖定按鈕互動） */
     isSubmitting?: boolean;
+    /** 若照片中已偵測出電子發票 QR Code，提供其歸一化錨點供自動框選參考 */
+    anchorRect?: NormalizedRect | null;
+    /** 若已偵測出電子發票 QR Code，於裁切畫面上方顯示融合提示文字 */
+    qrHintText?: string;
   }>(),
   {
     isSubmitting: false,
+    anchorRect: null,
+    qrHintText: '',
   }
 );
 
@@ -73,6 +75,9 @@ const isImageLoaded = ref(false);
 
 /** 影像裁切與 JPEG 編碼中標記（防止快速連點） */
 const isEncoding = ref(false);
+
+/** 是否套用了傳統影像處理自動初框偵測 */
+const autoCropApplied = ref(false);
 
 /** 當前正矩形選取框（預設保留些許邊距，方便使用者立即辨識可調邊界） */
 const cropRect = ref<NormalizedRect>({
@@ -111,10 +116,21 @@ function clamp(value: number, min: number, max: number): number {
 }
 
 /**
- * 圖片載入完成事件
+ * 圖片載入完成事件：嘗試以純前端影像處理自動定位發票初始框，失敗則退回預設框
  */
 function handleImageLoad() {
   isImageLoaded.value = true;
+  const imgEl = imageRef.value;
+  if (!imgEl) return;
+
+  const detected = detectReceiptBoundsFromImage(imgEl, props.anchorRect);
+  if (detected) {
+    cropRect.value = detected.rect;
+    autoCropApplied.value = true;
+  } else {
+    cropRect.value = { x: 0.06, y: 0.06, width: 0.88, height: 0.88 };
+    autoCropApplied.value = false;
+  }
 }
 
 /**
@@ -122,6 +138,7 @@ function handleImageLoad() {
  */
 function handleSelectFull() {
   if (props.isSubmitting) return;
+  autoCropApplied.value = false;
   cropRect.value = { x: 0, y: 0, width: 1, height: 1 };
 }
 
@@ -130,6 +147,7 @@ function handleSelectFull() {
  */
 function onPointerDown(handle: DragHandle, event: PointerEvent) {
   if (props.isSubmitting) return;
+  autoCropApplied.value = false;
   const imgEl = imageRef.value;
   if (!imgEl) return;
 
@@ -324,9 +342,21 @@ async function handleConfirmCrop() {
 
 <template>
   <div class="space-y-3" data-testid="receipt-cropper">
+    <div
+      v-if="qrHintText"
+      data-testid="cropper-qr-hint"
+      class="text-[11px] text-teal-800 bg-teal-50 border border-teal-200 px-2.5 py-1.5 rounded-lg font-medium"
+    >
+      {{ qrHintText }}
+    </div>
+
     <div class="flex items-center justify-between gap-2 text-xs">
       <span class="text-teal-700 font-medium">
-        拖曳框線選取要辨識的發票範圍（正矩形）
+        {{
+          autoCropApplied
+            ? '已自動框選發票大致範圍，可拖曳微調'
+            : '拖曳框線選取要辨識的發票範圍（正矩形）'
+        }}
       </span>
       <button
         type="button"
