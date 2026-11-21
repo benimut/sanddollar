@@ -72,13 +72,15 @@ function setupVideoAndCanvasMocks(videoWidth = 1920, videoHeight = 1080) {
     height: h,
   }));
 
-  const createElementSpy = vi.spyOn(document, 'createElement').mockImplementation(((tagName: string, options?: ElementCreationOptions) => {
+      const createElementSpy = vi.spyOn(document, 'createElement').mockImplementation(((tagName: string, options?: ElementCreationOptions) => {
     const el = originalCreateElement(tagName, options);
     if (tagName.toLowerCase() === 'canvas') {
       Object.defineProperty(el, 'getContext', {
         value: vi.fn().mockReturnValue({
           drawImage,
           getImageData,
+          fillRect: vi.fn(),
+          fillStyle: '#ffffff',
         }),
       });
     }
@@ -119,7 +121,7 @@ describe('InvoiceScannerModal 電子發票相機掃描驗證套件', () => {
     cleanup: () => void;
   }
 
-  function mountModal(): MountHelperResult {
+  function mountModal(extraProps: Record<string, unknown> = {}): MountHelperResult {
     const container = document.createElement('div');
     document.body.appendChild(container);
 
@@ -129,6 +131,7 @@ describe('InvoiceScannerModal 電子發票相機掃描驗證套件', () => {
     };
 
     const app = createApp(InvoiceScannerModal, {
+      ...extraProps,
       onClose: () => {
         emittedEvents.close.push(true);
       },
@@ -195,8 +198,8 @@ describe('InvoiceScannerModal 電子發票相機掃描驗證套件', () => {
     delete (window as unknown as { BarcodeDetector?: unknown }).BarcodeDetector;
   });
 
-  it('掃描彈窗應採純相機介面（無手動輸入框、無「解析發票」按鈕、無分類下拉選單且完整顯示相機畫面）', async () => {
-    const { container, cleanup } = mountModal();
+  it('掃描彈窗應採純相機介面（無手動輸入框、無「解析發票」與重複「取消」按鈕、無分類選單且完整顯示相機畫面）', async () => {
+    const { container, emittedEvents, cleanup } = mountModal();
     await flushAsyncWork();
 
     try {
@@ -204,10 +207,20 @@ describe('InvoiceScannerModal 電子發票相機掃描驗證套件', () => {
       expect(container.querySelector('#right-qr'), '應已移除右側手動輸入框').toBeNull();
       expect(container.querySelector('select'), '掃描階段不應出現分類下拉選單').toBeNull();
       expect(container.textContent, '底部操作列不應包含「解析發票」按鈕').not.toContain('解析發票');
+      const cancelBtn = Array.from(container.querySelectorAll('button')).find(
+        (b) => b.textContent?.trim() === '取消'
+      );
+      expect(cancelBtn, '應已移除與右上角 ✕ 重複的底部取消按鈕').toBeUndefined();
 
       const videoEl = container.querySelector('video');
       expect(videoEl, '應存在相機預覽 video 元素').not.toBeNull();
       expect(videoEl?.className, '相機預覽應採 object-contain 完整顯示不裁切').toContain('object-contain');
+
+      const closeBtn = container.querySelector('button[aria-label="關閉"]') as HTMLButtonElement;
+      expect(closeBtn, '應保留右上角關閉按鈕').not.toBeNull();
+      closeBtn.click();
+      await flushAsyncWork();
+      expect(emittedEvents.close.length).toBe(1);
     } finally {
       cleanup();
     }
@@ -240,12 +253,18 @@ describe('InvoiceScannerModal 電子發票相機掃描驗證套件', () => {
     }
     (window as unknown as { BarcodeDetector: unknown }).BarcodeDetector = MockBarcodeDetector;
 
+    const fetchSpy = vi.fn();
+    vi.stubGlobal('fetch', fetchSpy);
+
     const mediaMocks = setupVideoAndCanvasMocks(1920, 1080);
     const { container, emittedEvents, cleanup } = mountModal();
 
     try {
       // 等待開流穩定延遲 (250ms) + 首次掃描
       await flushAsyncWork(360);
+
+      // 離線掃描電子發票 QR 全程嚴禁發送任何 /api/* 認證或辨識請求
+      expect(fetchSpy).not.toHaveBeenCalled();
 
       expect(getUserMedia).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -296,6 +315,7 @@ describe('InvoiceScannerModal 電子發票相機掃描驗證套件', () => {
     } finally {
       cleanup();
       mediaMocks.restore();
+      vi.unstubAllGlobals();
     }
 
     expect(stopTrack).toHaveBeenCalled();
@@ -490,6 +510,233 @@ describe('InvoiceScannerModal 電子發票相機掃描驗證套件', () => {
     } finally {
       cleanup();
       mediaMocks.restore();
+    }
+  });
+
+  it('未授權狀態下純開啟彈窗絕不發送 API 請求，僅在點擊 ✨📷 AI 辨識當下才檢查授權且不誤進裁切頁', async () => {
+    const { stream } = createMockCameraStream();
+    Object.defineProperty(navigator, 'mediaDevices', {
+      value: {
+        getUserMedia: vi.fn().mockResolvedValue(stream),
+        enumerateDevices: vi.fn().mockResolvedValue([]),
+      },
+      configurable: true,
+    });
+
+    const fetchMock = vi.fn().mockResolvedValue({
+      type: 'opaqueredirect',
+      redirected: false,
+      status: 302,
+      ok: false,
+      headers: new Headers(),
+    } as Response);
+    vi.stubGlobal('fetch', fetchMock);
+
+    const mediaMocks = setupVideoAndCanvasMocks(1280, 720);
+    const { container, cleanup } = mountModal({ categories: ['餐飲'] });
+
+    try {
+      await flushAsyncWork(80);
+
+      // 未按下 AI 辨識前不應發送任何請求，也不應顯示認證卡
+      expect(fetchMock).not.toHaveBeenCalled();
+      expect(container.querySelector('[data-testid="paper-auth-prompt"]')).toBeNull();
+
+      const aiBtn = container.querySelector('[data-testid="ai-capture-btn"]') as HTMLButtonElement;
+      expect(aiBtn).not.toBeNull();
+      expect(aiBtn.textContent).toContain('✨📷 AI 辨識');
+
+      // 點擊 AI 按鈕當下才觸發 /api/auth?check=1
+      aiBtn.click();
+      await flushAsyncWork(60);
+
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(String(fetchMock.mock.calls[0][0])).toContain('/api/auth?check=1');
+      expect(container.querySelector('[data-testid="paper-auth-prompt"]')).not.toBeNull();
+      expect(container.querySelector('[data-testid="receipt-cropper"]')).toBeNull();
+    } finally {
+      cleanup();
+      mediaMocks.restore();
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('先掃出電子發票 QR 應顯示 ✨📷 AI 辨識補充，授權通過後以 FormData 連同 qrContext 上傳並顯示花費成本摘要', async () => {
+    const { stream } = createMockCameraStream();
+    Object.defineProperty(navigator, 'mediaDevices', {
+      value: {
+        getUserMedia: vi.fn().mockResolvedValue(stream),
+        enumerateDevices: vi.fn().mockResolvedValue([]),
+      },
+      configurable: true,
+    });
+
+    class MockBarcodeDetector {
+      static getSupportedFormats = vi.fn().mockResolvedValue(['qr_code']);
+      detect = vi.fn().mockResolvedValue([
+        {
+          rawValue: `${BASE_LEFT_77}:**:無糖綠茶:1:35`,
+          boundingBox: { x: 400, y: 780, width: 260, height: 260 },
+        },
+      ]);
+    }
+    (window as unknown as { BarcodeDetector: unknown }).BarcodeDetector = MockBarcodeDetector;
+
+    window.localStorage.setItem(
+      'sanddollar_ai_invoice_settings',
+      JSON.stringify({
+        model: 'gemini-3.8-flash',
+        thinkingLevel: 'low',
+        mediaResolution: 'medium',
+      })
+    );
+
+    const createObjectURLSpy = vi
+      .spyOn(URL, 'createObjectURL')
+      .mockReturnValue('blob:https://example.test/captured-invoice');
+    const revokeObjectURLSpy = vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => {});
+
+    const fetchMock = vi.fn().mockImplementation(async (input: RequestInfo | URL) => {
+      const url = typeof input === 'string' ? input : input.toString();
+      if (url.includes('/api/auth')) {
+        return new Response(JSON.stringify({ authenticated: true }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      if (url.includes('/api/parse-invoice')) {
+        return new Response(
+          JSON.stringify({
+            result: {
+              merchant: '全聯福利中心',
+              invoiceNumber: 'AB12345678',
+              date: '2024-05-20',
+              randomCode: '8888',
+              totalAmount: 200,
+              items: [
+                {
+                  name: '無糖綠茶',
+                  quantity: 1,
+                  unitPrice: 35,
+                  subtotal: 35,
+                  category: '餐飲',
+                },
+              ],
+              discounts: [],
+              source: 'paper',
+            },
+            meta: {
+              model: 'gemini-3.8-flash',
+              thinkingLevel: 'low',
+              mediaResolution: 'medium',
+              aiDurationMs: 1230,
+              workerDurationMs: 1250,
+              imageBytes: 12288,
+              inputTokens: 610,
+              outputTokens: 140,
+              thoughtTokens: 12,
+            },
+          }),
+          {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          }
+        );
+      }
+      return new Response('{}', { status: 404 });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const originalToBlob = HTMLCanvasElement.prototype.toBlob;
+    const toBlobMock = vi.fn(function (
+      this: HTMLCanvasElement,
+      callback: BlobCallback,
+      type?: string
+    ) {
+      callback(new Blob([new Uint8Array([1, 2, 3, 4])], { type: type || 'image/jpeg' }));
+    });
+    Object.defineProperty(HTMLCanvasElement.prototype, 'toBlob', {
+      value: toBlobMock,
+      configurable: true,
+    });
+
+    const mediaMocks = setupVideoAndCanvasMocks(1280, 1920);
+    const { container, cleanup } = mountModal({ categories: ['餐飲', '生活'] });
+
+    try {
+      // 等待離線 QR 掃描出結果
+      await flushAsyncWork(360);
+
+      expect(fetchMock, '離線掃出 QR 時仍不得呼叫任何 API').not.toHaveBeenCalled();
+
+      const aiBtn = container.querySelector('[data-testid="ai-capture-btn"]') as HTMLButtonElement;
+      expect(aiBtn).not.toBeNull();
+      expect(aiBtn.textContent).toContain('✨📷 AI 辨識補充');
+      expect(container.querySelector('select'), '掃描彈窗應保持極簡，不應出現選單').toBeNull();
+
+      // 按下「✨📷 AI 辨識補充」才檢查授權並進裁切
+      aiBtn.click();
+      await flushAsyncWork(60);
+
+      expect(createObjectURLSpy).toHaveBeenCalled();
+      expect(container.querySelector('[data-testid="cropper-qr-hint"]')?.textContent).toContain(
+        'AB12345678'
+      );
+
+      // 模擬 ReceiptCropper 圖片載入完成，解鎖確認裁切按鈕
+      const cropImg = container.querySelector('[data-testid="receipt-cropper"] img') as HTMLImageElement;
+      expect(cropImg).not.toBeNull();
+      Object.defineProperty(cropImg, 'naturalWidth', { value: 1200, configurable: true });
+      Object.defineProperty(cropImg, 'naturalHeight', { value: 1600, configurable: true });
+      cropImg.dispatchEvent(new Event('load'));
+      await nextTick();
+
+      const confirmBtn = container.querySelector('[data-testid="confirm-crop-btn"]') as HTMLButtonElement;
+      const selectFullBtn = container.querySelector('[data-testid="select-full-btn"]') as HTMLButtonElement;
+      const retakeBtn = container.querySelector('[data-testid="retake-photo-btn"]') as HTMLButtonElement;
+      expect(selectFullBtn, '全選按鈕應與確認範圍並排於裁切操作列').not.toBeNull();
+      expect(selectFullBtn.parentElement).toBe(confirmBtn.parentElement);
+      expect(retakeBtn.parentElement).toBe(confirmBtn.parentElement);
+      expect(container.textContent).not.toContain('已自動框選發票大致範圍');
+      expect(container.textContent).not.toContain('拖曳框線選取要辨識的發票範圍');
+
+      expect(confirmBtn.disabled).toBe(false);
+      confirmBtn.click();
+      await flushAsyncWork(80);
+
+      const parseCall = fetchMock.mock.calls.find(([url]) => String(url).includes('/api/parse-invoice'));
+      expect(parseCall, '應呼叫 POST /api/parse-invoice').toBeDefined();
+      const requestInit = parseCall?.[1] as RequestInit;
+      expect(requestInit.body).toBeInstanceOf(FormData);
+      const sentForm = requestInit.body as FormData;
+      expect(sentForm.get('image')).toBeInstanceOf(Blob);
+      expect(sentForm.get('categories')).toBe(JSON.stringify(['餐飲', '生活']));
+      expect(sentForm.get('model')).toBe('gemini-3.8-flash');
+      expect(sentForm.get('thinkingLevel')).toBe('low');
+      expect(sentForm.get('mediaResolution')).toBe('medium');
+
+      const sentQrContextRaw = sentForm.get('qrContext');
+      expect(typeof sentQrContextRaw).toBe('string');
+      const sentQrContext = JSON.parse(String(sentQrContextRaw)) as ParsedInvoiceResult;
+      expect(sentQrContext.invoiceNumber).toBe('AB12345678');
+
+      const metricsEl = container.querySelector('[data-testid="paper-parse-metrics"]');
+      expect(metricsEl, '辨識結果預覽區應顯示實測效能與花費成本摘要').not.toBeNull();
+      expect(metricsEl?.textContent).toContain('gemini-3.8-flash');
+      expect(metricsEl?.textContent).toContain('AI 1.2s');
+      expect(metricsEl?.textContent).toContain('12 KB');
+      expect(metricsEl?.textContent).toContain('花費成本：輸入 610 / 思考 12 / 輸出 140 token');
+    } finally {
+      cleanup();
+      mediaMocks.restore();
+      createObjectURLSpy.mockRestore();
+      expect(revokeObjectURLSpy).toHaveBeenCalledWith('blob:https://example.test/captured-invoice');
+      revokeObjectURLSpy.mockRestore();
+      vi.unstubAllGlobals();
+      Object.defineProperty(HTMLCanvasElement.prototype, 'toBlob', {
+        value: originalToBlob,
+        configurable: true,
+      });
     }
   });
 });

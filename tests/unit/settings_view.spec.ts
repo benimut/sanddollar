@@ -1087,4 +1087,156 @@ describe('Sand Dollar 設定頁面與導覽整合單元測試 (settings_view.spe
       expect(rewSrcSelect.value).toBe('玉山 Pi');
     });
   });
+
+  // ==========================================
+  // 9. 紙本發票 AI 辨識設定與持久化驗證
+  // ==========================================
+  describe('9. 紙本發票 AI 辨識設定與持久化驗證', () => {
+    let originalLocalStorageDescriptor: PropertyDescriptor | undefined;
+    let mockStorageMap: Map<string, string>;
+
+    beforeEach(() => {
+      originalLocalStorageDescriptor = Object.getOwnPropertyDescriptor(window, 'localStorage');
+      mockStorageMap = new Map<string, string>();
+      Object.defineProperty(window, 'localStorage', {
+        value: {
+          getItem: (key: string) => mockStorageMap.get(key) ?? null,
+          setItem: (key: string, val: string) => {
+            mockStorageMap.set(key, String(val));
+          },
+          removeItem: (key: string) => {
+            mockStorageMap.delete(key);
+          },
+          clear: () => {
+            mockStorageMap.clear();
+          },
+        },
+        configurable: true,
+      });
+    });
+
+    afterEach(() => {
+      mockStorageMap.clear();
+      if (originalLocalStorageDescriptor) {
+        Object.defineProperty(window, 'localStorage', originalLocalStorageDescriptor);
+      } else {
+        delete (window as unknown as { localStorage?: Storage }).localStorage;
+      }
+    });
+
+    it('預設選取 gemini-3.6-flash / minimal / medium，切換至 gemini-3.8-flash 時應自動將思考層級調整為合法的 low 並持久化', async () => {
+      window.localStorage.removeItem('sanddollar_ai_invoice_settings');
+
+      const firstMount = mountComponent(SettingsView);
+      activeCleanups.push(firstMount.cleanup);
+      await flushAsync(60);
+
+      const modelSelect = firstMount.container.querySelector('#ai-invoice-model-select') as HTMLSelectElement;
+      const thinkingSelect = firstMount.container.querySelector('#ai-invoice-thinking-select') as HTMLSelectElement;
+      const resolutionSelect = firstMount.container.querySelector('#ai-invoice-resolution-select') as HTMLSelectElement;
+
+      expect(modelSelect).not.toBeNull();
+      expect(thinkingSelect).not.toBeNull();
+      expect(resolutionSelect).not.toBeNull();
+
+      expect(modelSelect.value).toBe('gemini-3.6-flash');
+      expect(thinkingSelect.value).toBe('minimal');
+      expect(resolutionSelect.value).toBe('medium');
+
+      // 切換為不支援 minimal 思考的 gemini-3.8-flash
+      modelSelect.value = 'gemini-3.8-flash';
+      modelSelect.dispatchEvent(new Event('change'));
+      await flushAsync(40);
+
+      expect(thinkingSelect.value, '不支援 minimal 的模型應自動降為合法的 low').toBe('low');
+      const thinkingValues = Array.from(thinkingSelect.options).map((opt) => opt.value);
+      expect(thinkingValues).not.toContain('minimal');
+      expect(thinkingValues).toEqual(['low', 'medium', 'high']);
+
+      // 變更圖片解析度為 low
+      resolutionSelect.value = 'low';
+      resolutionSelect.dispatchEvent(new Event('change'));
+      await flushAsync(40);
+
+      expect(firstMount.container.querySelector('[data-testid="ai-settings-saved-notice"]')?.textContent).toContain('已自動儲存');
+
+      // 重新掛載確認從 localStorage 正確還原
+      firstMount.cleanup();
+      const secondMount = mountComponent(SettingsView);
+      activeCleanups.push(secondMount.cleanup);
+      await flushAsync(60);
+
+      expect((secondMount.container.querySelector('#ai-invoice-model-select') as HTMLSelectElement).value).toBe(
+        'gemini-3.8-flash'
+      );
+      expect((secondMount.container.querySelector('#ai-invoice-thinking-select') as HTMLSelectElement).value).toBe(
+        'low'
+      );
+      expect((secondMount.container.querySelector('#ai-invoice-resolution-select') as HTMLSelectElement).value).toBe(
+        'low'
+      );
+    });
+
+    it('點擊「登出 Cloudflare 授權」時應先檢查授權狀態：未授權僅提示不跳轉，已授權則導向動態登出端點', async () => {
+      const originalLocation = window.location;
+      const assignMock = vi.fn();
+      Object.defineProperty(window, 'location', {
+        value: {
+          pathname: '/',
+          search: '',
+          assign: assignMock,
+        },
+        configurable: true,
+      });
+
+      const fetchMock = vi
+        .fn()
+        .mockResolvedValueOnce({
+          type: 'opaqueredirect',
+          redirected: false,
+          status: 302,
+          ok: false,
+          headers: new Headers(),
+        } as Response)
+        .mockResolvedValueOnce(
+          new Response(JSON.stringify({ authenticated: true }), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          })
+        );
+      vi.stubGlobal('fetch', fetchMock);
+
+      const mounted = mountComponent(SettingsView);
+      activeCleanups.push(mounted.cleanup);
+      await flushAsync(60);
+
+      try {
+        const logoutBtn = mounted.container.querySelector('#btn-cloudflare-logout') as HTMLButtonElement;
+        expect(logoutBtn).not.toBeNull();
+
+        // 情境 1：目前未授權，僅顯示提示不跳轉
+        logoutBtn.click();
+        await flushAsync(40);
+
+        expect(fetchMock).toHaveBeenCalledTimes(1);
+        expect(assignMock).not.toHaveBeenCalled();
+        expect(
+          mounted.container.querySelector('[data-testid="cloudflare-logout-message"]')?.textContent
+        ).toContain('尚未授權登入 Cloudflare');
+
+        // 情境 2：目前已完成授權，導向同源動態登出端點 /api/auth?logout=1
+        logoutBtn.click();
+        await flushAsync(40);
+
+        expect(fetchMock).toHaveBeenCalledTimes(2);
+        expect(assignMock).toHaveBeenCalledWith('/api/auth?logout=1&returnTo=%2F');
+      } finally {
+        vi.unstubAllGlobals();
+        Object.defineProperty(window, 'location', {
+          value: originalLocation,
+          configurable: true,
+        });
+      }
+    });
+  });
 });
