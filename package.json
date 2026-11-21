@@ -11,7 +11,6 @@
     "test:e2e": "playwright test"
   },
   "dependencies": {
-    "@google/genai": "^3.6.1",
     "chart.js": "^4.4.7",
     "dexie": "^4.0.11",
     "jsqr": "^1.4.0",

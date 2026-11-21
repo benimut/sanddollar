@@ -12,10 +12,16 @@
  * 4. 無阻擋一鍵帶入表單：掃描端不選擇也不阻擋分類，解析後直接預覽並帶入支出表單，交由表單儲存時驗證分類。
  */
 
-import { ref, onMounted, onUnmounted } from 'vue';
+import { ref, computed, onMounted, onUnmounted } from 'vue';
 import { SwitchCamera, RotateCcw, Camera, Crop, ShieldCheck } from 'lucide-vue-next';
 import jsQR from 'jsqr';
 import { parseInvoiceQRCode, type ParsedInvoiceResult } from '@/utils/invoiceParser';
+import {
+  loadAiInvoiceSettings,
+  type AiInvoiceModelId,
+  type AiMediaResolution,
+  type AiThinkingLevel,
+} from '@/utils/aiInvoiceSettings';
 import ReceiptCropper, { type CroppedImagePayload } from './ReceiptCropper.vue';
 
 /** 瀏覽器原生 BarcodeDetector 單筆偵測結果介面 */
@@ -107,11 +113,53 @@ const scanMode = ref<ScanMode>('qr');
 /** 紙本發票流程目前階段 */
 const paperStep = ref<PaperStep>('camera');
 
-/** 紙本發票拍下之原始影像 Data URL（供正矩形框選裁切） */
+/** 紙本發票拍照之暫存影像 URL（Object URL 或降級 Data URL，供正矩形框選裁切） */
 const capturedImageUrl = ref('');
+
+/** 由 URL.createObjectURL 建立之 Object URL 參照（供安全回收記憶體） */
+let capturedObjectUrl = '';
+
+/** 紙本發票 AI 辨識實測效能摘要結構 */
+interface PaperParseMetrics {
+  model: AiInvoiceModelId | string;
+  thinkingLevel: AiThinkingLevel | string;
+  mediaResolution: AiMediaResolution | string;
+  clientTotalMs: number;
+  aiDurationMs?: number;
+  imageKB: number;
+  inputTokens?: number;
+  outputTokens?: number;
+  thoughtTokens?: number;
+}
+
+/** 最近一次紙本發票 AI 辨識之實測效能與 Token 統計 */
+const paperParseMetrics = ref<PaperParseMetrics | null>(null);
 
 /** 是否正在呼叫後端 Gemini API 辨識紙本發票 */
 const isAnalyzingPaper = ref(false);
+
+/** 紙本發票是否正在擷取靜態影像中 */
+let isCapturingPhoto = false;
+
+/** 紙本發票結果預覽區之單行實測效能摘要文字 */
+const formattedPaperMetrics = computed(() => {
+  const m = paperParseMetrics.value;
+  if (!m) return '';
+
+  const totalSec = (m.clientTotalMs / 1000).toFixed(1);
+  const timePart =
+    typeof m.aiDurationMs === 'number'
+      ? `總計 ${totalSec}s（AI ${(m.aiDurationMs / 1000).toFixed(1)}s）`
+      : `總計 ${totalSec}s`;
+
+  const tokenParts: string[] = [];
+  if (typeof m.inputTokens === 'number') tokenParts.push(`輸 ${m.inputTokens}`);
+  if (typeof m.thoughtTokens === 'number') tokenParts.push(`思 ${m.thoughtTokens}`);
+  if (typeof m.outputTokens === 'number') tokenParts.push(`出 ${m.outputTokens}`);
+
+  const tokenSuffix = tokenParts.length > 0 ? ` · ${tokenParts.join(' / ')} tok` : '';
+  return `${m.model} · ${m.thinkingLevel} · ${m.mediaResolution} ｜ ${timePart} · ${m.imageKB} KB${tokenSuffix}`;
+});
 
 /** 紙本發票 AI 認證狀態：unknown 未檢查 / checking 檢查中 / authenticated 已通過 / required 需認證 */
 type PaperAuthState = 'unknown' | 'checking' | 'authenticated' | 'required';
@@ -913,6 +961,21 @@ function handleStartPaperAuth() {
 }
 
 /**
+ * 釋放並清空目前拍攝之紙本發票暫存影像 URL（確保 Object URL 記憶體妥善回收）
+ */
+function releaseCapturedImageUrl() {
+  if (capturedObjectUrl && typeof URL !== 'undefined' && typeof URL.revokeObjectURL === 'function') {
+    try {
+      URL.revokeObjectURL(capturedObjectUrl);
+    } catch {
+      // 忽略回收例外
+    }
+  }
+  capturedObjectUrl = '';
+  capturedImageUrl.value = '';
+}
+
+/**
  * 切換掃描模式（電子發票 QR Code / 紙本發票拍照辨識）
  * 切換時共用既有相機串流不重開鏡頭，降低延遲與權限干擾。
  */
@@ -924,20 +987,21 @@ function handleSwitchMode(mode: ScanMode) {
   cameraWarning.value = '';
   isAuthExpired.value = false;
   parsedResult.value = null;
+  paperParseMetrics.value = null;
 
   if (mode === 'paper') {
     pauseScanningLoop();
     leftCode.value = '';
     rightCode.value = '';
     paperStep.value = 'camera';
-    capturedImageUrl.value = '';
+    releaseCapturedImageUrl();
     cameraStatus.value = isCameraActive.value
       ? '請將紙本發票置於畫面中，對焦清晰後按下拍照'
       : '';
     void checkPaperAuth();
   } else {
     paperStep.value = 'camera';
-    capturedImageUrl.value = '';
+    releaseCapturedImageUrl();
     isScanPaused.value = false;
     if (isCameraActive.value) {
       isScanning = true;
@@ -950,9 +1014,10 @@ function handleSwitchMode(mode: ScanMode) {
 }
 
 /**
- * 紙本發票模式：擷取目前相機高解析度影格，進入正矩形框選裁切步驟
+ * 紙本發票模式：擷取目前相機高解析度影格，優先使用非同步 toBlob + Object URL 以減少卡頓
  */
-function handleCapturePaperPhoto() {
+async function handleCapturePaperPhoto() {
+  if (isCapturingPhoto || isAnalyzingPaper.value) return;
   errorMessage.value = '';
   isAuthExpired.value = false;
 
@@ -977,10 +1042,56 @@ function handleCapturePaperPhoto() {
     return;
   }
 
-  ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-  capturedImageUrl.value = canvas.toDataURL('image/jpeg', 0.92);
-  parsedResult.value = null;
-  paperStep.value = 'crop';
+  isCapturingPhoto = true;
+  try {
+    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+    let nextImageUrl = '';
+    let nextObjectUrl = '';
+
+    if (
+      typeof canvas.toBlob === 'function' &&
+      typeof URL !== 'undefined' &&
+      typeof URL.createObjectURL === 'function'
+    ) {
+      const blob = await new Promise<Blob | null>((resolve) => {
+        try {
+          canvas.toBlob((res) => resolve(res), 'image/jpeg', 0.9);
+        } catch {
+          resolve(null);
+        }
+      });
+      if (blob && blob.size > 0) {
+        nextObjectUrl = URL.createObjectURL(blob);
+        nextImageUrl = nextObjectUrl;
+      }
+    }
+
+    if (!nextImageUrl && typeof canvas.toDataURL === 'function') {
+      nextImageUrl = canvas.toDataURL('image/jpeg', 0.9);
+    }
+
+    if (isDisposed || scanMode.value !== 'paper') {
+      if (nextObjectUrl && typeof URL.revokeObjectURL === 'function') {
+        URL.revokeObjectURL(nextObjectUrl);
+      }
+      return;
+    }
+
+    if (!nextImageUrl) {
+      errorMessage.value = '無法建立發票預覽影像，請重試。';
+      return;
+    }
+
+    releaseCapturedImageUrl();
+    capturedObjectUrl = nextObjectUrl;
+    capturedImageUrl.value = nextImageUrl;
+    parsedResult.value = null;
+    paperParseMetrics.value = null;
+    paperStep.value = 'crop';
+  } finally {
+    isCapturingPhoto = false;
+  }
 }
 
 /**
@@ -988,8 +1099,9 @@ function handleCapturePaperPhoto() {
  */
 function handlePaperRetake() {
   if (isAnalyzingPaper.value) return;
-  capturedImageUrl.value = '';
+  releaseCapturedImageUrl();
   parsedResult.value = null;
+  paperParseMetrics.value = null;
   errorMessage.value = '';
   isAuthExpired.value = false;
   paperStep.value = 'camera';
@@ -1004,23 +1116,38 @@ function handlePaperRetake() {
 function handlePaperRecrop() {
   if (isAnalyzingPaper.value || !capturedImageUrl.value) return;
   parsedResult.value = null;
+  paperParseMetrics.value = null;
   errorMessage.value = '';
   isAuthExpired.value = false;
   paperStep.value = 'crop';
 }
 
 /**
- * 紙本發票模式：將正矩形裁切並壓縮後之影像送往同源 Worker API 進行 Gemini AI 辨識
+ * 紙本發票模式：將正矩形裁切並壓縮後之二進位影像以 FormData 送往同源 Worker API 進行 Gemini AI 辨識
  */
 async function handlePaperCropConfirm(payload: CroppedImagePayload) {
   if (isAnalyzingPaper.value) return;
   errorMessage.value = '';
   isAuthExpired.value = false;
+  paperParseMetrics.value = null;
 
   if (typeof navigator !== 'undefined' && navigator.onLine === false) {
     errorMessage.value = '目前處於離線狀態，紙本發票 AI 辨識需要網路連線。';
     return;
   }
+
+  const aiSettings = loadAiInvoiceSettings();
+  const requestStartMs =
+    typeof performance !== 'undefined' && typeof performance.now === 'function'
+      ? performance.now()
+      : Date.now();
+
+  const formData = new FormData();
+  formData.append('image', payload.imageBlob, 'receipt.jpg');
+  formData.append('categories', JSON.stringify(props.categories));
+  formData.append('model', aiSettings.model);
+  formData.append('thinkingLevel', aiSettings.thinkingLevel);
+  formData.append('mediaResolution', aiSettings.mediaResolution);
 
   isAnalyzingPaper.value = true;
   try {
@@ -1028,14 +1155,7 @@ async function handlePaperCropConfirm(payload: CroppedImagePayload) {
       method: 'POST',
       credentials: 'same-origin',
       redirect: 'manual',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        imageBase64: payload.imageBase64,
-        mimeType: payload.mimeType,
-        categories: props.categories,
-      }),
+      body: formData,
     });
 
     const responseContentType = response.headers.get('content-type') || '';
@@ -1058,6 +1178,17 @@ async function handlePaperCropConfirm(payload: CroppedImagePayload) {
 
     const data = (await response.json()) as {
       result?: ParsedInvoiceResult;
+      meta?: {
+        model?: string;
+        thinkingLevel?: string;
+        mediaResolution?: string;
+        aiDurationMs?: number;
+        workerDurationMs?: number;
+        imageBytes?: number;
+        inputTokens?: number;
+        outputTokens?: number;
+        thoughtTokens?: number;
+      };
       error?: string;
     };
 
@@ -1066,6 +1197,26 @@ async function handlePaperCropConfirm(payload: CroppedImagePayload) {
         data.error || `發票辨識失敗（狀態碼 ${response.status}），請確認照片清晰度後重試。`;
       return;
     }
+
+    const requestEndMs =
+      typeof performance !== 'undefined' && typeof performance.now === 'function'
+        ? performance.now()
+        : Date.now();
+    const clientTotalMs = Math.max(0, Math.round(requestEndMs - requestStartMs));
+    const effectiveBytes = data.meta?.imageBytes ?? payload.sizeBytes ?? payload.imageBlob.size;
+
+    paperParseMetrics.value = {
+      model: data.meta?.model || aiSettings.model,
+      thinkingLevel: data.meta?.thinkingLevel || aiSettings.thinkingLevel,
+      mediaResolution: data.meta?.mediaResolution || aiSettings.mediaResolution,
+      clientTotalMs,
+      aiDurationMs:
+        typeof data.meta?.aiDurationMs === 'number' ? data.meta.aiDurationMs : undefined,
+      imageKB: Math.max(1, Math.round(effectiveBytes / 1024)),
+      inputTokens: data.meta?.inputTokens,
+      outputTokens: data.meta?.outputTokens,
+      thoughtTokens: data.meta?.thoughtTokens,
+    };
 
     parsedResult.value = {
       ...data.result,
@@ -1110,10 +1261,11 @@ function parseCurrentCodes() {
 }
 
 /**
- * 關閉彈窗並安全釋放相機資源
+ * 關閉彈窗並安全釋放相機與暫存影像資源
  */
 async function handleClose() {
   isDisposed = true;
+  releaseCapturedImageUrl();
   await stopScanner();
   emit('close');
 }
@@ -1126,6 +1278,7 @@ async function handleApply() {
 
   emit('parsed', parsedResult.value);
   isDisposed = true;
+  releaseCapturedImageUrl();
   await stopScanner();
   emit('close');
 }
@@ -1138,6 +1291,7 @@ onMounted(async () => {
 
 onUnmounted(async () => {
   isDisposed = true;
+  releaseCapturedImageUrl();
   await stopScanner();
 });
 </script>
@@ -1450,6 +1604,15 @@ onUnmounted(async () => {
                 </span>
               </div>
             </div>
+          </div>
+
+          <!-- 紙本發票 AI 辨識實測效能摘要列（供對比各模型與參數設定速度） -->
+          <div
+            v-if="parsedResult.source === 'paper' && formattedPaperMetrics"
+            data-testid="paper-parse-metrics"
+            class="pt-2 border-t border-teal-200/70 text-[11px] text-teal-800/80 font-mono leading-relaxed break-all"
+          >
+            {{ formattedPaperMetrics }}
           </div>
         </div>
       </div>

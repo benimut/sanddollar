@@ -14,14 +14,16 @@ import { Maximize2, RotateCcw, Sparkles } from 'lucide-vue-next';
 
 /** 裁切並壓縮完成後輸出之影像資料 */
 export interface CroppedImagePayload {
-  /** 不含 data URL 前綴之純 Base64 字串 */
-  imageBase64: string;
+  /** 裁切壓縮後之二進位 JPEG Blob（可直接透過 FormData 上傳，無 Base64 膨脹） */
+  imageBlob: Blob;
   /** 影像 MIME 類型（固定為 image/jpeg） */
   mimeType: 'image/jpeg';
   /** 輸出影像寬度（像素） */
   width: number;
   /** 輸出影像高度（像素） */
   height: number;
+  /** 二進位影像位元組數 */
+  sizeBytes: number;
 }
 
 /** 歸一化正矩形裁切框座標（數值皆介於 0～1） */
@@ -39,10 +41,10 @@ type DragHandle = 'move' | 'n' | 's' | 'e' | 'w' | 'nw' | 'ne' | 'sw' | 'se';
 const MIN_CROP_RATIO = 0.12;
 
 /** 裁切輸出 JPEG 之長邊最大像素上限 */
-const MAX_OUTPUT_DIMENSION = 1600;
+const MAX_OUTPUT_DIMENSION = 1280;
 
 /** 裁切輸出 JPEG 壓縮品質 */
-const OUTPUT_JPEG_QUALITY = 0.85;
+const OUTPUT_JPEG_QUALITY = 0.78;
 
 const props = withDefaults(
   defineProps<{
@@ -68,6 +70,9 @@ const imageRef = ref<HTMLImageElement | null>(null);
 
 /** 圖片已載入完成標記 */
 const isImageLoaded = ref(false);
+
+/** 影像裁切與 JPEG 編碼中標記（防止快速連點） */
+const isEncoding = ref(false);
 
 /** 當前正矩形選取框（預設保留些許邊距，方便使用者立即辨識可調邊界） */
 const cropRect = ref<NormalizedRect>({
@@ -221,48 +226,99 @@ function onPointerUp(event: PointerEvent) {
 }
 
 /**
- * 依目前選取之正矩形範圍從原圖裁切並壓縮為 JPEG，通知父層送往後端辨識
+ * 將 Data URL 轉換為 Blob（作為舊版環境或不支援 canvas.toBlob 時的安全備援）
  */
-function handleConfirmCrop() {
-  if (props.isSubmitting) return;
+function dataUrlToBlob(dataUrl: string, fallbackMime: string): Blob {
+  const parts = dataUrl.split(',');
+  const mimeMatch = parts[0]?.match(/:(.*?);/);
+  const mime = mimeMatch?.[1] || fallbackMime;
+  const base64 = parts[1] || '';
+  const binary = atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) {
+    bytes[i] = binary.charCodeAt(i);
+  }
+  return new Blob([bytes], { type: mime });
+}
+
+/**
+ * 將 HTMLCanvasElement 非同步編碼為 JPEG Blob（不阻塞主執行緒，無 toBlob 時安全降級）
+ */
+async function encodeCanvasToJpegBlob(
+  canvas: HTMLCanvasElement,
+  quality: number
+): Promise<Blob | null> {
+  if (typeof canvas.toBlob === 'function') {
+    const blob = await new Promise<Blob | null>((resolve) => {
+      try {
+        canvas.toBlob((result) => resolve(result), 'image/jpeg', quality);
+      } catch {
+        resolve(null);
+      }
+    });
+    if (blob && blob.size > 0) {
+      return blob;
+    }
+  }
+
+  if (typeof canvas.toDataURL === 'function') {
+    const dataUrl = canvas.toDataURL('image/jpeg', quality);
+    if (dataUrl) {
+      return dataUrlToBlob(dataUrl, 'image/jpeg');
+    }
+  }
+
+  return null;
+}
+
+/**
+ * 依目前選取之正矩形範圍從原圖裁切並壓縮為二進位 JPEG Blob，通知父層送往後端辨識
+ */
+async function handleConfirmCrop() {
+  if (props.isSubmitting || isEncoding.value) return;
   const imgEl = imageRef.value;
   if (!imgEl || !imgEl.naturalWidth || !imgEl.naturalHeight) return;
 
-  const naturalW = imgEl.naturalWidth;
-  const naturalH = imgEl.naturalHeight;
+  isEncoding.value = true;
+  try {
+    const naturalW = imgEl.naturalWidth;
+    const naturalH = imgEl.naturalHeight;
 
-  const sx = Math.round(cropRect.value.x * naturalW);
-  const sy = Math.round(cropRect.value.y * naturalH);
-  const sw = Math.max(16, Math.round(cropRect.value.width * naturalW));
-  const sh = Math.max(16, Math.round(cropRect.value.height * naturalH));
+    const sx = Math.round(cropRect.value.x * naturalW);
+    const sy = Math.round(cropRect.value.y * naturalH);
+    const sw = Math.max(16, Math.round(cropRect.value.width * naturalW));
+    const sh = Math.max(16, Math.round(cropRect.value.height * naturalH));
 
-  // 等比縮放至長邊不超過上限，控制檔案體積與辨識速度
-  const maxSide = Math.max(sw, sh);
-  const scale = maxSide > MAX_OUTPUT_DIMENSION ? MAX_OUTPUT_DIMENSION / maxSide : 1;
-  const targetW = Math.max(16, Math.round(sw * scale));
-  const targetH = Math.max(16, Math.round(sh * scale));
+    // 等比縮放至長邊不超過上限，控制檔案體積與辨識速度
+    const maxSide = Math.max(sw, sh);
+    const scale = maxSide > MAX_OUTPUT_DIMENSION ? MAX_OUTPUT_DIMENSION / maxSide : 1;
+    const targetW = Math.max(16, Math.round(sw * scale));
+    const targetH = Math.max(16, Math.round(sh * scale));
 
-  const canvas = document.createElement('canvas');
-  canvas.width = targetW;
-  canvas.height = targetH;
-  const ctx = canvas.getContext('2d');
-  if (!ctx) return;
+    const canvas = document.createElement('canvas');
+    canvas.width = targetW;
+    canvas.height = targetH;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
 
-  // 填滿白底避免任何透明像素殘留
-  ctx.fillStyle = '#ffffff';
-  ctx.fillRect(0, 0, targetW, targetH);
-  ctx.drawImage(imgEl, sx, sy, sw, sh, 0, 0, targetW, targetH);
+    // 填滿白底避免任何透明像素殘留
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, targetW, targetH);
+    ctx.drawImage(imgEl, sx, sy, sw, sh, 0, 0, targetW, targetH);
 
-  const dataUrl = canvas.toDataURL('image/jpeg', OUTPUT_JPEG_QUALITY);
-  const commaIdx = dataUrl.indexOf(',');
-  const imageBase64 = commaIdx >= 0 ? dataUrl.slice(commaIdx + 1) : dataUrl;
+    const imageBlob = await encodeCanvasToJpegBlob(canvas, OUTPUT_JPEG_QUALITY);
+    if (!imageBlob) return;
 
-  emit('confirm', {
-    imageBase64,
-    mimeType: 'image/jpeg',
-    width: targetW,
-    height: targetH,
-  });
+    emit('confirm', {
+      imageBlob,
+      mimeType: 'image/jpeg',
+      width: targetW,
+      height: targetH,
+      sizeBytes: imageBlob.size,
+    });
+  } finally {
+    isEncoding.value = false;
+  }
 }
 </script>
 
@@ -421,12 +477,12 @@ function handleConfirmCrop() {
       <button
         type="button"
         data-testid="confirm-crop-btn"
-        :disabled="!isImageLoaded || isSubmitting"
+        :disabled="!isImageLoaded || isSubmitting || isEncoding"
         class="flex-1 inline-flex items-center justify-center gap-1.5 px-4 py-2 text-xs font-bold text-white bg-teal-600 hover:bg-teal-700 rounded-xl shadow-xs transition-colors disabled:opacity-60"
         @click="handleConfirmCrop"
       >
         <Sparkles class="w-3.5 h-3.5" />
-        <span>{{ isSubmitting ? 'AI 辨識中，請稍候...' : '確認範圍並辨識' }}</span>
+        <span>{{ isSubmitting ? 'AI 辨識中，請稍候...' : isEncoding ? '處理影像中...' : '確認範圍並辨識' }}</span>
       </button>
     </div>
   </div>

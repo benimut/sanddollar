@@ -72,13 +72,15 @@ function setupVideoAndCanvasMocks(videoWidth = 1920, videoHeight = 1080) {
     height: h,
   }));
 
-  const createElementSpy = vi.spyOn(document, 'createElement').mockImplementation(((tagName: string, options?: ElementCreationOptions) => {
+      const createElementSpy = vi.spyOn(document, 'createElement').mockImplementation(((tagName: string, options?: ElementCreationOptions) => {
     const el = originalCreateElement(tagName, options);
     if (tagName.toLowerCase() === 'canvas') {
       Object.defineProperty(el, 'getContext', {
         value: vi.fn().mockReturnValue({
           drawImage,
           getImageData,
+          fillRect: vi.fn(),
+          fillStyle: '#ffffff',
         }),
       });
     }
@@ -119,7 +121,7 @@ describe('InvoiceScannerModal 電子發票相機掃描驗證套件', () => {
     cleanup: () => void;
   }
 
-  function mountModal(): MountHelperResult {
+  function mountModal(extraProps: Record<string, unknown> = {}): MountHelperResult {
     const container = document.createElement('div');
     document.body.appendChild(container);
 
@@ -129,6 +131,7 @@ describe('InvoiceScannerModal 電子發票相機掃描驗證套件', () => {
     };
 
     const app = createApp(InvoiceScannerModal, {
+      ...extraProps,
       onClose: () => {
         emittedEvents.close.push(true);
       },
@@ -490,6 +493,159 @@ describe('InvoiceScannerModal 電子發票相機掃描驗證套件', () => {
     } finally {
       cleanup();
       mediaMocks.restore();
+    }
+  });
+
+  it('紙本發票拍照模式應讀取設定頁 AI 參數、以 FormData 二進位上傳並顯示實測效能摘要', async () => {
+    const { stream } = createMockCameraStream();
+    Object.defineProperty(navigator, 'mediaDevices', {
+      value: {
+        getUserMedia: vi.fn().mockResolvedValue(stream),
+        enumerateDevices: vi.fn().mockResolvedValue([]),
+      },
+      configurable: true,
+    });
+
+    window.localStorage.setItem(
+      'sanddollar_ai_invoice_settings',
+      JSON.stringify({
+        model: 'gemini-3.8-flash',
+        thinkingLevel: 'low',
+        mediaResolution: 'medium',
+      })
+    );
+
+    const createObjectURLSpy = vi
+      .spyOn(URL, 'createObjectURL')
+      .mockReturnValue('blob:https://example.test/captured-invoice');
+    const revokeObjectURLSpy = vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => {});
+
+    const fetchMock = vi.fn().mockImplementation(async (input: RequestInfo | URL) => {
+      const url = typeof input === 'string' ? input : input.toString();
+      if (url.includes('/api/auth')) {
+        return new Response(JSON.stringify({ authenticated: true }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      if (url.includes('/api/parse-invoice')) {
+        return new Response(
+          JSON.stringify({
+            result: {
+              merchant: '全聯福利中心',
+              invoiceNumber: 'AB12345678',
+              date: '2026-11-21',
+              randomCode: '8492',
+              totalAmount: 89,
+              items: [
+                {
+                  name: '全脂鮮乳',
+                  quantity: 1,
+                  unitPrice: 89,
+                  subtotal: 89,
+                  category: '餐飲',
+                },
+              ],
+              discounts: [],
+              source: 'paper',
+            },
+            meta: {
+              model: 'gemini-3.8-flash',
+              thinkingLevel: 'low',
+              mediaResolution: 'medium',
+              aiDurationMs: 1230,
+              workerDurationMs: 1250,
+              imageBytes: 12288,
+              inputTokens: 610,
+              outputTokens: 140,
+              thoughtTokens: 12,
+            },
+          }),
+          {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          }
+        );
+      }
+      return new Response('{}', { status: 404 });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const originalToBlob = HTMLCanvasElement.prototype.toBlob;
+    const toBlobMock = vi.fn(function (
+      this: HTMLCanvasElement,
+      callback: BlobCallback,
+      type?: string
+    ) {
+      callback(new Blob([new Uint8Array([1, 2, 3, 4])], { type: type || 'image/jpeg' }));
+    });
+    Object.defineProperty(HTMLCanvasElement.prototype, 'toBlob', {
+      value: toBlobMock,
+      configurable: true,
+    });
+
+    const mediaMocks = setupVideoAndCanvasMocks(1280, 720);
+    const { container, cleanup } = mountModal({ categories: ['餐飲', '生活'] });
+
+    try {
+      await flushAsyncWork(80);
+
+      // 切換至紙本發票拍照模式
+      const paperTabBtn = container.querySelector('[data-testid="mode-paper-btn"]') as HTMLButtonElement;
+      paperTabBtn.click();
+      await flushAsyncWork(60);
+
+      expect(container.querySelector('select'), '掃描彈窗應保持極簡，不應出現選單').toBeNull();
+
+      // 按下拍照並等待非同步 toBlob
+      const captureBtn = container.querySelector('[data-testid="capture-paper-btn"]') as HTMLButtonElement;
+      expect(captureBtn).not.toBeNull();
+      captureBtn.click();
+      await flushAsyncWork(60);
+
+      expect(createObjectURLSpy).toHaveBeenCalled();
+
+      // 模擬 ReceiptCropper 圖片載入完成，解鎖確認裁切按鈕
+      const cropImg = container.querySelector('[data-testid="receipt-cropper"] img') as HTMLImageElement;
+      expect(cropImg).not.toBeNull();
+      Object.defineProperty(cropImg, 'naturalWidth', { value: 1200, configurable: true });
+      Object.defineProperty(cropImg, 'naturalHeight', { value: 1600, configurable: true });
+      cropImg.dispatchEvent(new Event('load'));
+      await nextTick();
+
+      const confirmBtn = container.querySelector('[data-testid="confirm-crop-btn"]') as HTMLButtonElement;
+      expect(confirmBtn.disabled).toBe(false);
+      confirmBtn.click();
+      await flushAsyncWork(80);
+
+      const parseCall = fetchMock.mock.calls.find(([url]) => String(url).includes('/api/parse-invoice'));
+      expect(parseCall, '應呼叫 POST /api/parse-invoice').toBeDefined();
+      const requestInit = parseCall?.[1] as RequestInit;
+      expect(requestInit.body).toBeInstanceOf(FormData);
+      const sentForm = requestInit.body as FormData;
+      expect(sentForm.get('image')).toBeInstanceOf(Blob);
+      expect(sentForm.get('categories')).toBe(JSON.stringify(['餐飲', '生活']));
+      expect(sentForm.get('model')).toBe('gemini-3.8-flash');
+      expect(sentForm.get('thinkingLevel')).toBe('low');
+      expect(sentForm.get('mediaResolution')).toBe('medium');
+
+      const metricsEl = container.querySelector('[data-testid="paper-parse-metrics"]');
+      expect(metricsEl, '辨識結果預覽區應顯示實測效能摘要').not.toBeNull();
+      expect(metricsEl?.textContent).toContain('gemini-3.8-flash');
+      expect(metricsEl?.textContent).toContain('AI 1.2s');
+      expect(metricsEl?.textContent).toContain('12 KB');
+      expect(metricsEl?.textContent).toContain('輸 610 / 思 12 / 出 140 tok');
+    } finally {
+      cleanup();
+      mediaMocks.restore();
+      createObjectURLSpy.mockRestore();
+      expect(revokeObjectURLSpy).toHaveBeenCalledWith('blob:https://example.test/captured-invoice');
+      revokeObjectURLSpy.mockRestore();
+      vi.unstubAllGlobals();
+      Object.defineProperty(HTMLCanvasElement.prototype, 'toBlob', {
+        value: originalToBlob,
+        configurable: true,
+      });
     }
   });
 });

@@ -3,13 +3,11 @@
  * @description Sanddollar Cloudflare Worker 後端入口（整合 Static Assets 與紙本發票 AI 辨識 API）
  *
  * 核心職責：
- * 1. 提供同源 POST /api/parse-invoice 端點，接收前端正矩形裁切並壓縮後之紙本發票影像。
- * 2. 透過 Cloudflare Worker Secret (GEMINI_API_KEY) 呼叫最新 @google/genai SDK (gemini-4-hydrogen)，
- *    以 Structured Outputs 回傳符合前端 ParsedInvoiceResult 契約之結構化 JSON。
- * 3. 非 /api/* 路徑委派予 Workers Static Assets 託管 Vue SPA。
+ * 1. 提供同源 POST /api/parse-invoice 端點，支援 multipart/form-data 二進位上傳（主力）與 JSON Base64（向下相容）。
+ * 2. 以原生 fetch() 直呼 Gemini Interactions REST API（v1beta + Api-Revision: 2026-05-20），移除龐大 SDK 相依以消除冷啟動。
+ * 3. 依據前端設定頁選擇（模型、thinking_level、resolution）經白名單與相容性檢核後呼叫模型並回傳結構化 JSON 與效能遙測。
+ * 4. 提供 GET /api/auth 檢查／完成 Cloudflare Access 認證；非 /api/* 路徑委派予 Workers Static Assets 託管 Vue SPA。
  */
-
-import { GoogleGenAI } from '@google/genai/web';
 
 /** Cloudflare Worker 環境綁定與 Secret 介面 */
 interface Env {
@@ -19,14 +17,41 @@ interface Env {
   GEMINI_API_KEY?: string;
 }
 
-/** 前端送入之紙本發票辨識請求酬載 */
-interface ParseInvoiceRequestBody {
-  /** 不含 data URL 前綴之圖片 Base64 字串 */
+/** 支援之圖片 MIME 類型白名單 */
+type SupportedImageMimeType = 'image/jpeg' | 'image/png' | 'image/webp';
+
+/** 支援之 Gemini 模型白名單 */
+type SupportedModelId =
+  | 'gemini-3.6-flash'
+  | 'gemini-3.8-flash'
+  | 'gemini-3.5-flash-lite'
+  | 'gemini-4-hydrogen';
+
+/** 支援之思考層級 */
+type ThinkingLevel = 'minimal' | 'low' | 'medium' | 'high';
+
+/** 支援之圖片解析度等級 */
+type MediaResolution = 'low' | 'medium' | 'high';
+
+/** 前端以 JSON 送入之紙本發票辨識請求酬載（向下相容保留） */
+interface ParseInvoiceJsonBody {
   imageBase64?: unknown;
-  /** 圖片 MIME 類型（僅支援 image/jpeg, image/png, image/webp） */
   mimeType?: unknown;
-  /** 使用者現有之支出分類清單（僅用於品項分類對應，不含店家清單） */
   categories?: unknown;
+  model?: unknown;
+  thinkingLevel?: unknown;
+  mediaResolution?: unknown;
+}
+
+/** 解析後統一之發票請求輸入結構 */
+interface ExtractedInvoiceRequest {
+  imageBase64: string;
+  mimeType: SupportedImageMimeType;
+  imageBytes: number;
+  categories: string[];
+  model: SupportedModelId;
+  thinkingLevel: ThinkingLevel;
+  mediaResolution: MediaResolution;
 }
 
 /** 回傳予前端之商品明細結構 */
@@ -57,10 +82,66 @@ interface NormalizedPaperInvoiceResult {
   source: 'paper';
 }
 
-/** 允許之圖片 MIME 類型白名單 */
-const ALLOWED_MIME_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp']);
+/** 回傳予前端之效能與 Token 遙測中繼資料 */
+interface ParseInvoiceMeta {
+  model: SupportedModelId;
+  thinkingLevel: ThinkingLevel;
+  mediaResolution: MediaResolution;
+  aiDurationMs: number;
+  workerDurationMs: number;
+  imageBytes: number;
+  inputTokens?: number;
+  outputTokens?: number;
+  thoughtTokens?: number;
+}
 
-/** 請求本文最大位元組數（約 3MB JSON） */
+/** Gemini Interactions REST API 回應內容部分結構 */
+interface InteractionContentPart {
+  type?: string;
+  text?: string;
+}
+
+/** Gemini Interactions REST API 回應步驟結構（2026-05-20 修訂） */
+interface InteractionStep {
+  type?: string;
+  content?: InteractionContentPart[];
+}
+
+/** Gemini Interactions REST API Token 使用量統計結構 */
+interface InteractionUsage {
+  total_input_tokens?: number;
+  total_output_tokens?: number;
+  total_thought_tokens?: number;
+  total_tokens?: number;
+}
+
+/** Gemini Interactions REST API 回應主體 */
+interface InteractionApiResponse {
+  status?: string;
+  steps?: InteractionStep[];
+  output_text?: string;
+  outputs?: Array<{ type?: string; text?: string }>;
+  usage?: InteractionUsage;
+  error?: { message?: string; status?: string; code?: number };
+}
+
+/** Gemini Interactions REST API 端點 */
+const GEMINI_INTERACTIONS_ENDPOINT = 'https://generativelanguage.googleapis.com/v1beta/interactions';
+
+/** Gemini Interactions API 修訂版本標頭（啟用新版 steps 與 response_format 結構） */
+const GEMINI_API_REVISION = '2026-05-20';
+
+/** 允許之圖片 MIME 類型白名單 */
+const ALLOWED_MIME_TYPES = new Set<SupportedImageMimeType>([
+  'image/jpeg',
+  'image/png',
+  'image/webp',
+]);
+
+/** 二進位上傳圖片最大位元組數（2MB） */
+const MAX_IMAGE_BYTES = 2 * 1024 * 1024;
+
+/** JSON 請求本文最大位元組數（約 3MB） */
 const MAX_REQUEST_BYTES = 3 * 1024 * 1024;
 
 /** 單張圖片 Base64 字串長度上限（約對應原始影像 2MB） */
@@ -72,66 +153,84 @@ const MAX_CATEGORIES_COUNT = 60;
 /** 單一分類名稱最大字元長度 */
 const MAX_CATEGORY_NAME_LENGTH = 40;
 
-/** 使用之 Gemini 模型名稱 */
-const GEMINI_MODEL = 'gemini-4-hydrogen';
+/** 預設模型與圖片解析度 */
+const DEFAULT_MODEL: SupportedModelId = 'gemini-3.6-flash';
+const DEFAULT_MEDIA_RESOLUTION: MediaResolution = 'medium';
 
-/** 強制模型輸出結構化發票結果之 JSON Schema */
+/** 各模型支援之思考層級規則與預設值 */
+const MODEL_THINKING_RULES: Record<
+  SupportedModelId,
+  { allowed: readonly ThinkingLevel[]; defaultLevel: ThinkingLevel }
+> = {
+  'gemini-3.6-flash': {
+    allowed: ['minimal', 'low', 'medium', 'high'],
+    defaultLevel: 'minimal',
+  },
+  'gemini-3.5-flash-lite': {
+    allowed: ['minimal', 'low', 'medium', 'high'],
+    defaultLevel: 'minimal',
+  },
+  'gemini-3.8-flash': {
+    allowed: ['low', 'medium', 'high'],
+    defaultLevel: 'low',
+  },
+  'gemini-4-hydrogen': {
+    allowed: ['low', 'medium', 'high'],
+    defaultLevel: 'low',
+  },
+};
+
+/** 允許之圖片解析度集合 */
+const ALLOWED_RESOLUTIONS = new Set<MediaResolution>(['low', 'medium', 'high']);
+
+/** 強制模型輸出結構化發票結果之精簡 JSON Schema */
 const PAPER_INVOICE_RESPONSE_SCHEMA = {
   type: 'object',
   properties: {
     merchant: {
       type: 'string',
-      description: '照片上實際印出的店家或商號名稱文字；若照片未顯示或無法辨識則回傳空字串。不可猜測或杜撰。',
+      description: '照片實際印出之店家名稱；未顯示則回傳空字串。',
     },
     invoiceNumber: {
       type: 'string',
-      description: '統一發票字軌號碼（2碼大寫英文+8碼數字，移除連字號如 AB12345678）；若非發票或無法辨識則回傳空字串。',
+      description: '統一發票號碼（2大寫英文+8數字，去連字號）；無則回傳空字串。',
     },
     date: {
       type: 'string',
-      description: '消費開立日期，格式必須為西元 YYYY-MM-DD（民國年須加1911轉換）；若僅有期別無確切日期或無法辨識則回傳空字串。',
+      description: '西元開立日期 YYYY-MM-DD；僅有期別無日或無法辨識則回傳空字串。',
     },
     randomCode: {
       type: 'string',
-      description: '4碼數字隨機碼（僅限電子發票證明聯）；傳統紙本發票或無隨機碼則回傳空字串。',
+      description: '4碼數字隨機碼；無則回傳空字串。',
     },
     totalAmount: {
       type: 'number',
-      description: '最終實付總計金額（非負數）。',
+      description: '最終實付總計整數金額（非負數）。',
     },
     items: {
       type: 'array',
-      description: '購買商品明細清單（僅含正向商品，不含獨立折扣折抵項）。',
+      description: '正向購買商品明細（不含獨立折扣）。',
       items: {
         type: 'object',
         properties: {
-          name: { type: 'string', description: '商品品名' },
-          quantity: { type: 'number', description: '購買數量（大於 0，未標示則為 1）' },
-          unitPrice: { type: 'number', description: '商品單價（非負數）' },
-          subtotal: { type: 'number', description: '品項小計金額（非負數）' },
-          category: {
-            type: 'string',
-            description: '從提供的現有支出分類清單中挑選完全相符的分類名稱；無合適者或清單為空則回傳空字串。',
-          },
+          name: { type: 'string', description: '商品名稱' },
+          quantity: { type: 'number', description: '數量（大於 0）' },
+          unitPrice: { type: 'number', description: '單價（非負數）' },
+          subtotal: { type: 'number', description: '品項實計小計（非負數）' },
+          category: { type: 'string', description: '支出分類名稱或空字串' },
         },
         required: ['name', 'quantity', 'unitPrice', 'subtotal', 'category'],
       },
     },
     discounts: {
       type: 'array',
-      description: '獨立折扣、滿額折抵、點數折抵等負向扣減項目清單。',
+      description: '獨立折扣、滿額折或點數折抵項目。',
       items: {
         type: 'object',
         properties: {
-          name: {
-            type: 'string',
-            description: '折扣名稱說明；若照片未印出名稱則回傳空字串，不可自行補字。',
-          },
-          amount: { type: 'number', description: '折抵金額（請輸出大於 0 的正數）' },
-          category: {
-            type: 'string',
-            description: '若該折扣明確對應特定商品分類且存在於提供的分類清單中，填入該分類名稱；否則回傳空字串。',
-          },
+          name: { type: 'string', description: '折扣名稱，未印出則回傳空字串' },
+          amount: { type: 'number', description: '折抵正數金額' },
+          category: { type: 'string', description: '對應分類名稱或空字串' },
         },
         required: ['name', 'amount', 'category'],
       },
@@ -143,14 +242,69 @@ const PAPER_INVOICE_RESPONSE_SCHEMA = {
 /**
  * 建構標準 JSON 回應並附上基礎安全與禁快取標頭
  */
-function jsonResponse(payload: unknown, status = 200): Response {
+function jsonResponse(
+  payload: unknown,
+  status = 200,
+  extraHeaders?: Record<string, string>
+): Response {
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json; charset=utf-8',
+    'Cache-Control': 'no-store',
+    ...extraHeaders,
+  };
   return new Response(JSON.stringify(payload), {
     status,
-    headers: {
-      'Content-Type': 'application/json; charset=utf-8',
-      'Cache-Control': 'no-store',
-    },
+    headers,
   });
+}
+
+/**
+ * 將二進位 ArrayBuffer 分塊轉換為 Base64 字串，避免單次展開大陣列導致呼叫堆疊溢位
+ */
+function arrayBufferToBase64(buffer: ArrayBuffer): string {
+  const bytes = new Uint8Array(buffer);
+  const chunkSize = 0x8000;
+  let binary = '';
+
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    const chunk = bytes.subarray(i, Math.min(i + chunkSize, bytes.length));
+    binary += String.fromCharCode(...chunk);
+  }
+
+  return btoa(binary);
+}
+
+/**
+ * 驗證並正規化 AI 模型、思考層級與圖片解析度設定
+ */
+function sanitizeAiParams(
+  rawModel: unknown,
+  rawThinkingLevel: unknown,
+  rawMediaResolution: unknown
+): {
+  model: SupportedModelId;
+  thinkingLevel: ThinkingLevel;
+  mediaResolution: MediaResolution;
+} {
+  const modelCandidate = typeof rawModel === 'string' ? rawModel.trim() : '';
+  const model: SupportedModelId =
+    modelCandidate in MODEL_THINKING_RULES ? (modelCandidate as SupportedModelId) : DEFAULT_MODEL;
+
+  const rule = MODEL_THINKING_RULES[model];
+  const thinkingCandidate = typeof rawThinkingLevel === 'string' ? rawThinkingLevel.trim() : '';
+  const thinkingLevel: ThinkingLevel = rule.allowed.includes(thinkingCandidate as ThinkingLevel)
+    ? (thinkingCandidate as ThinkingLevel)
+    : rule.defaultLevel;
+
+  const resolutionCandidate =
+    typeof rawMediaResolution === 'string' ? rawMediaResolution.trim() : '';
+  const mediaResolution: MediaResolution = ALLOWED_RESOLUTIONS.has(
+    resolutionCandidate as MediaResolution
+  )
+    ? (resolutionCandidate as MediaResolution)
+    : DEFAULT_MEDIA_RESOLUTION;
+
+  return { model, thinkingLevel, mediaResolution };
 }
 
 /**
@@ -171,6 +325,184 @@ function sanitizeCategories(raw: unknown): string[] {
   }
 
   return result;
+}
+
+/**
+ * 解析來自 multipart/form-data 或 application/json 的發票辨識請求內容
+ */
+async function extractParseInvoiceRequest(
+  request: Request
+): Promise<{ ok: true; data: ExtractedInvoiceRequest } | { ok: false; response: Response }> {
+  const contentType = (request.headers.get('content-type') || '').toLowerCase();
+
+  // 路徑 A：multipart/form-data（二進位檔案上傳，省去 Base64 網路膨脹）
+  if (contentType.includes('multipart/form-data')) {
+    const contentLengthHeader = request.headers.get('content-length');
+    if (contentLengthHeader && Number(contentLengthHeader) > MAX_REQUEST_BYTES) {
+      return {
+        ok: false,
+        response: jsonResponse({ error: '上傳影像體積過大，請重新框選較小範圍或重拍。' }, 413),
+      };
+    }
+
+    let formData: FormData;
+    try {
+      formData = await request.formData();
+    } catch {
+      return {
+        ok: false,
+        response: jsonResponse({ error: '無法讀取表單影像資料，請重試。' }, 400),
+      };
+    }
+
+    const imageEntry = formData.get('image');
+    if (
+      !imageEntry ||
+      typeof imageEntry !== 'object' ||
+      typeof (imageEntry as Blob).arrayBuffer !== 'function'
+    ) {
+      return {
+        ok: false,
+        response: jsonResponse({ error: '缺少發票影像資料' }, 400),
+      };
+    }
+
+    const imageBlob = imageEntry as Blob;
+    if (imageBlob.size <= 0) {
+      return {
+        ok: false,
+        response: jsonResponse({ error: '缺少發票影像資料' }, 400),
+      };
+    }
+
+    if (imageBlob.size > MAX_IMAGE_BYTES) {
+      return {
+        ok: false,
+        response: jsonResponse({ error: '裁切後影像仍超過 2MB 上限，請縮小選取範圍後重試。' }, 413),
+      };
+    }
+
+    const fallbackMime = formData.get('mimeType');
+    const rawMime = (
+      imageBlob.type || (typeof fallbackMime === 'string' ? fallbackMime : '')
+    )
+      .trim()
+      .toLowerCase();
+    if (!ALLOWED_MIME_TYPES.has(rawMime as SupportedImageMimeType)) {
+      return {
+        ok: false,
+        response: jsonResponse({ error: '不支援的影像格式，僅支援 JPEG、PNG 或 WebP。' }, 400),
+      };
+    }
+
+    let rawCategories: unknown = [];
+    const categoriesEntry = formData.get('categories');
+    if (typeof categoriesEntry === 'string' && categoriesEntry.trim()) {
+      try {
+        rawCategories = JSON.parse(categoriesEntry);
+      } catch {
+        rawCategories = [];
+      }
+    }
+
+    const buffer = await imageBlob.arrayBuffer();
+    const imageBase64 = arrayBufferToBase64(buffer);
+    const { model, thinkingLevel, mediaResolution } = sanitizeAiParams(
+      formData.get('model'),
+      formData.get('thinkingLevel'),
+      formData.get('mediaResolution')
+    );
+
+    return {
+      ok: true,
+      data: {
+        imageBase64,
+        mimeType: rawMime as SupportedImageMimeType,
+        imageBytes: imageBlob.size,
+        categories: sanitizeCategories(rawCategories),
+        model,
+        thinkingLevel,
+        mediaResolution,
+      },
+    };
+  }
+
+  // 路徑 B：application/json（向下相容既有測試與呼叫端）
+  if (contentType.includes('application/json')) {
+    const contentLengthHeader = request.headers.get('content-length');
+    if (contentLengthHeader && Number(contentLengthHeader) > MAX_REQUEST_BYTES) {
+      return {
+        ok: false,
+        response: jsonResponse({ error: '上傳影像體積過大，請重新框選較小範圍或重拍。' }, 413),
+      };
+    }
+
+    let rawText: string;
+    try {
+      rawText = await request.text();
+    } catch {
+      return { ok: false, response: jsonResponse({ error: '無法讀取請求內容' }, 400) };
+    }
+
+    if (rawText.length > MAX_REQUEST_BYTES) {
+      return {
+        ok: false,
+        response: jsonResponse({ error: '上傳影像體積過大，請重新框選較小範圍或重拍。' }, 413),
+      };
+    }
+
+    let body: ParseInvoiceJsonBody;
+    try {
+      body = JSON.parse(rawText) as ParseInvoiceJsonBody;
+    } catch {
+      return { ok: false, response: jsonResponse({ error: '無效的 JSON 請求格式' }, 400) };
+    }
+
+    const imageBase64 = typeof body.imageBase64 === 'string' ? body.imageBase64.trim() : '';
+    const mimeType = typeof body.mimeType === 'string' ? body.mimeType.trim().toLowerCase() : '';
+
+    if (!imageBase64) {
+      return { ok: false, response: jsonResponse({ error: '缺少發票影像資料' }, 400) };
+    }
+
+    if (imageBase64.length > MAX_BASE64_LENGTH) {
+      return {
+        ok: false,
+        response: jsonResponse({ error: '裁切後影像仍超過 2MB 上限，請縮小選取範圍後重試。' }, 413),
+      };
+    }
+
+    if (!ALLOWED_MIME_TYPES.has(mimeType as SupportedImageMimeType)) {
+      return {
+        ok: false,
+        response: jsonResponse({ error: '不支援的影像格式，僅支援 JPEG、PNG 或 WebP。' }, 400),
+      };
+    }
+
+    const { model, thinkingLevel, mediaResolution } = sanitizeAiParams(
+      body.model,
+      body.thinkingLevel,
+      body.mediaResolution
+    );
+
+    return {
+      ok: true,
+      data: {
+        imageBase64,
+        mimeType: mimeType as SupportedImageMimeType,
+        imageBytes: Math.floor((imageBase64.length * 3) / 4),
+        categories: sanitizeCategories(body.categories),
+        model,
+        thinkingLevel,
+        mediaResolution,
+      },
+    };
+  }
+
+  return {
+    ok: false,
+    response: jsonResponse({ error: '請求格式必須為 multipart/form-data 或 application/json' }, 415),
+  };
 }
 
 /**
@@ -249,7 +581,7 @@ function normalizeModelOutput(
     const parsedSubtotal = Number(obj.subtotal);
 
     let unitPrice = Number.isFinite(parsedUnitPrice) && parsedUnitPrice >= 0 ? parsedUnitPrice : 0;
-    let subtotal =
+    const subtotal =
       Number.isFinite(parsedSubtotal) && parsedSubtotal >= 0
         ? Math.round(parsedSubtotal)
         : Math.round(quantity * unitPrice);
@@ -317,29 +649,72 @@ function normalizeModelOutput(
 }
 
 /**
- * 建構提供予 Gemini 模型之繁體中文發票解析指令
+ * 建構提供予 Gemini 模型之精簡繁體中文發票解析指令
  */
 function buildPromptText(categories: string[]): string {
   const categoryGuide =
     categories.length > 0
-      ? `使用者現有支出分類清單：[${categories.map((c) => `"${c}"`).join(', ')}]。請僅從此清單挑選完全一致的分類字串，嚴禁自創清單以外的分類；若無法判斷請填入空字串 ""。`
-      : '使用者尚未提供支出分類清單，所有品項與折扣的 category 欄位一律回傳空字串 ""。';
+      ? `支出分類清單：[${categories.map((c) => `"${c}"`).join(', ')}]，僅挑選完全一致字串，無合適則填 ""。`
+      : '未提供分類清單，category 欄位一律填 ""。';
 
   return [
-    '請仔細辨識這張台灣紙本發票或收據照片，並嚴格依照 JSON Schema 輸出辨識結果。',
-    '規則如下：',
-    '1. 店家名稱 (merchant)：僅提取照片上實際印出的店名或商號文字，不要猜測、不要改寫、看不到就回傳空字串 ""。',
-    '2. 開立日期 (date)：請轉換為西元 YYYY-MM-DD（台灣民國年請加 1911，例如 115/11/20 -> 2026-11-20）。若照片只印月份期別（如 115年11-12月）而無確切日期，請回傳空字串 ""。',
-    '3. 發票號碼 (invoiceNumber)：若有統一發票號碼（2碼英文+8碼數字）請去掉連字號回傳，如 AB12345678；無則回傳 ""。',
-    '4. 購買品項 (items)：列出每個購買商品的品名、數量、單價與小計；若單價與數量未分開標示，數量設為 1、單價等於該項金額。',
-    '5. 獨立折扣 (discounts)：若發票含有折扣、滿額折、會員折抵、負數折讓等項目，請拆分至 discounts 陣列，amount 輸出正數；若照片沒寫折扣名稱請保留空字串 ""，切勿自行補上「折扣」字樣。',
-    `6. 支出分類對應：${categoryGuide}`,
-    '7. 總計金額 (totalAmount)：輸出發票上最終實付總金額（整數）。',
+    '辨識台灣紙本發票或收據照片，嚴格依 JSON Schema 輸出：',
+    '1. merchant：僅取照片實際印出店名，勿猜測改寫，看不到填 ""。',
+    '2. date：西元 YYYY-MM-DD（民國年+1911，例 115/11/20 -> 2026-11-20）；僅印期別無確切日期填 ""。',
+    '3. invoiceNumber：2碼英文+8碼數字（去連字號），無則 ""；randomCode：4碼數字，無則 ""。',
+    '4. items：列出正向商品品名、數量、單價、小計；未分開標示時 quantity=1、unitPrice=subtotal。',
+    '5. discounts：折扣、滿額折、點數折抵等負向項目拆至此處，amount 填正數；照片無名稱則填 ""，勿補字。',
+    `6. category：${categoryGuide}`,
+    '7. totalAmount：發票最終實付整數金額。',
   ].join('\n');
 }
 
 /**
- * 安全解析 @google/genai 拋出之錯誤物件，擷取 HTTP 狀態碼與 Google API 錯誤原因（絕不外洩 API Key）
+ * 從 Interactions REST API 回應物件抽取模型文字輸出
+ * 嚴格篩選 model_output 步驟，避免把內部 thought 步驟混入結構化 JSON。
+ */
+function extractInteractionOutputText(payload: InteractionApiResponse): string {
+  if (Array.isArray(payload.steps)) {
+    const modelChunks: string[] = [];
+    for (const step of payload.steps) {
+      if (step?.type !== 'model_output' || !Array.isArray(step.content)) continue;
+      for (const part of step.content) {
+        if (part?.type === 'text' && typeof part.text === 'string') {
+          modelChunks.push(part.text);
+        }
+      }
+    }
+    const joined = modelChunks.join('').trim();
+    if (joined) return joined;
+  }
+
+  if (typeof payload.output_text === 'string' && payload.output_text.trim()) {
+    return payload.output_text.trim();
+  }
+
+  if (Array.isArray(payload.outputs)) {
+    const legacyChunks = payload.outputs
+      .filter((out) => typeof out?.text === 'string')
+      .map((out) => out.text as string);
+    const joined = legacyChunks.join('').trim();
+    if (joined) return joined;
+  }
+
+  return '';
+}
+
+/**
+ * 安全轉換可選 Token 計數為非負整數
+ */
+function toOptionalTokenCount(val: unknown): number | undefined {
+  if (typeof val !== 'number' || !Number.isFinite(val) || val < 0) {
+    return undefined;
+  }
+  return Math.round(val);
+}
+
+/**
+ * 安全解析 Gemini API 拋出或回傳之錯誤訊息，擷取狀態碼與摘要（絕不外洩 API Key）
  */
 function extractSafeGeminiError(err: unknown): { status?: number; summary: string } {
   if (!err || typeof err !== 'object') {
@@ -412,76 +787,75 @@ async function handleParseInvoice(request: Request, env: Env): Promise<Response>
     );
   }
 
-  const contentType = request.headers.get('content-type') || '';
-  if (!contentType.toLowerCase().includes('application/json')) {
-    return jsonResponse({ error: '請求格式必須為 application/json' }, 415);
+  const reqStartMs = performance.now();
+  const extracted = await extractParseInvoiceRequest(request);
+  if (!extracted.ok) {
+    return extracted.response;
   }
 
-  const contentLengthHeader = request.headers.get('content-length');
-  if (contentLengthHeader && Number(contentLengthHeader) > MAX_REQUEST_BYTES) {
-    return jsonResponse({ error: '上傳影像體積過大，請重新框選較小範圍或重拍。' }, 413);
-  }
-
-  let rawText: string;
-  try {
-    rawText = await request.text();
-  } catch {
-    return jsonResponse({ error: '無法讀取請求內容' }, 400);
-  }
-
-  if (rawText.length > MAX_REQUEST_BYTES) {
-    return jsonResponse({ error: '上傳影像體積過大，請重新框選較小範圍或重拍。' }, 413);
-  }
-
-  let body: ParseInvoiceRequestBody;
-  try {
-    body = JSON.parse(rawText) as ParseInvoiceRequestBody;
-  } catch {
-    return jsonResponse({ error: '無效的 JSON 請求格式' }, 400);
-  }
-
-  const imageBase64 = typeof body.imageBase64 === 'string' ? body.imageBase64.trim() : '';
-  const mimeType = typeof body.mimeType === 'string' ? body.mimeType.trim().toLowerCase() : '';
-
-  if (!imageBase64) {
-    return jsonResponse({ error: '缺少發票影像資料' }, 400);
-  }
-
-  if (imageBase64.length > MAX_BASE64_LENGTH) {
-    return jsonResponse({ error: '裁切後影像仍超過 2MB 上限，請縮小選取範圍後重試。' }, 413);
-  }
-
-  if (!ALLOWED_MIME_TYPES.has(mimeType)) {
-    return jsonResponse({ error: '不支援的影像格式，僅支援 JPEG、PNG 或 WebP。' }, 400);
-  }
-
-  const categories = sanitizeCategories(body.categories);
+  const {
+    imageBase64,
+    mimeType,
+    imageBytes,
+    categories,
+    model,
+    thinkingLevel,
+    mediaResolution,
+  } = extracted.data;
+  const prepDurationMs = Math.max(0, Math.round(performance.now() - reqStartMs));
 
   try {
-    // Interactions API 的多模態圖片輸入目前需指定 v1beta
-    const ai = new GoogleGenAI({ apiKey, apiVersion: 'v1beta' });
-
-    const interaction = await ai.interactions.create({
-      model: GEMINI_MODEL,
-      store: false,
-      system_instruction:
-        '你是專精台灣傳統紙本統一發票與收據辨識的記帳助理，只根據圖片實際內容輸出嚴格合法的 JSON，絕不杜撰圖片中不存在的資訊。',
-      input: [
-        { type: 'text', text: buildPromptText(categories) },
-        {
-          type: 'image',
-          data: imageBase64,
-          mime_type: mimeType as 'image/jpeg' | 'image/png' | 'image/webp',
-        },
-      ],
-      response_format: {
-        type: 'text',
-        mime_type: 'application/json',
-        schema: PAPER_INVOICE_RESPONSE_SCHEMA,
+    const aiStartMs = performance.now();
+    const geminiResponse = await fetch(GEMINI_INTERACTIONS_ENDPOINT, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-goog-api-key': apiKey,
+        'Api-Revision': GEMINI_API_REVISION,
       },
+      body: JSON.stringify({
+        model,
+        store: false,
+        system_instruction:
+          '你是專精台灣紙本發票與收據辨識的記帳助理，只根據圖片實際內容輸出嚴格合法 JSON，絕不杜撰不存在資訊。',
+        generation_config: {
+          thinking_level: thinkingLevel,
+        },
+        input: [
+          { type: 'text', text: buildPromptText(categories) },
+          {
+            type: 'image',
+            data: imageBase64,
+            mime_type: mimeType,
+            resolution: mediaResolution,
+          },
+        ],
+        response_format: {
+          type: 'text',
+          mime_type: 'application/json',
+          schema: PAPER_INVOICE_RESPONSE_SCHEMA,
+        },
+      }),
     });
 
-    const outputText = interaction.output_text?.trim();
+    if (!geminiResponse.ok) {
+      const errBodyText = await geminiResponse.text().catch(() => '');
+      const { status, summary } = extractSafeGeminiError({
+        statusCode: geminiResponse.status,
+        body: errBodyText,
+      });
+      console.error('[parse-invoice] Gemini API 呼叫失敗:', status ?? 'unknown', summary);
+      const statusLabel = status ? `HTTP ${status}` : '呼叫異常';
+      return jsonResponse(
+        { error: `紙本發票辨識失敗（${statusLabel}）：${summary}` },
+        502
+      );
+    }
+
+    const interaction = (await geminiResponse.json()) as InteractionApiResponse;
+    const aiDurationMs = Math.max(0, Math.round(performance.now() - aiStartMs));
+    const outputText = extractInteractionOutputText(interaction);
+
     if (!outputText) {
       return jsonResponse({ error: 'AI 未能回傳有效辨識內容，請確認照片清晰度後重拍。' }, 502);
     }
@@ -494,11 +868,25 @@ async function handleParseInvoice(request: Request, env: Env): Promise<Response>
     }
 
     const result = normalizeModelOutput(parsedJson, categories);
-    return jsonResponse({ result }, 200);
+    const workerDurationMs = Math.max(0, Math.round(performance.now() - reqStartMs));
+    const meta: ParseInvoiceMeta = {
+      model,
+      thinkingLevel,
+      mediaResolution,
+      aiDurationMs,
+      workerDurationMs,
+      imageBytes,
+      inputTokens: toOptionalTokenCount(interaction.usage?.total_input_tokens),
+      outputTokens: toOptionalTokenCount(interaction.usage?.total_output_tokens),
+      thoughtTokens: toOptionalTokenCount(interaction.usage?.total_thought_tokens),
+    };
+
+    const serverTiming = `prep;dur=${prepDurationMs}, gemini;dur=${aiDurationMs}, total;dur=${workerDurationMs}`;
+    return jsonResponse({ result, meta }, 200, { 'Server-Timing': serverTiming });
   } catch (err: unknown) {
     const { status, summary } = extractSafeGeminiError(err);
-    console.error('[parse-invoice] Gemini API 呼叫失敗:', status ?? 'unknown', summary);
-    const statusLabel = status ? `HTTP ${status}` : '呼叫異常';
+    console.error('[parse-invoice] Gemini API 連線異常:', status ?? 'unknown', summary);
+    const statusLabel = status ? `HTTP ${status}` : '連線異常';
     return jsonResponse(
       { error: `紙本發票辨識失敗（${statusLabel}）：${summary}` },
       502
