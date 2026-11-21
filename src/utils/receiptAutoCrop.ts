@@ -93,13 +93,13 @@ function rectsOverlap(a: NormalizedRect, b: NormalizedRect): boolean {
 }
 
 /**
- * 將歸一化矩形向四週均等擴張指定安全邊距並夾限於 [0, 1]
+ * 將歸一化矩形座標夾限於 [0, 1] 並四捨五入至小數點後四位（不額外外擴邊距）
  */
-function expandAndClampRect(rect: NormalizedRect, padding: number): NormalizedRect {
-  const left = clamp(rect.x - padding, 0, 1);
-  const top = clamp(rect.y - padding, 0, 1);
-  const right = clamp(rect.x + rect.width + padding, 0, 1);
-  const bottom = clamp(rect.y + rect.height + padding, 0, 1);
+function clampNormalizedRect(rect: NormalizedRect): NormalizedRect {
+  const left = clamp(rect.x, 0, 1);
+  const top = clamp(rect.y, 0, 1);
+  const right = clamp(rect.x + rect.width, 0, 1);
+  const bottom = clamp(rect.y + rect.height, 0, 1);
   return {
     x: Number(left.toFixed(4)),
     y: Number(top.toFixed(4)),
@@ -313,7 +313,7 @@ function detectPaperComponentRect(
   const mergedRect = anchorRect
     ? unionNormalizedRects(bestComponent.rect, anchorRect)
     : bestComponent.rect;
-  const finalRect = expandAndClampRect(mergedRect, 0.04);
+  const finalRect = clampNormalizedRect(mergedRect);
 
   const lumContrast = clamp((otsuThreshold - borderMeanLum) / 100, 0, 1);
   const pixelCoverage = clamp(bestComponent.pixelCount / (totalPixels * 0.5), 0.3, 1);
@@ -447,7 +447,7 @@ function detectTextGradientRect(
     height: boxH,
   };
   const mergedRect = anchorRect ? unionNormalizedRects(rawRect, anchorRect) : rawRect;
-  const finalRect = expandAndClampRect(mergedRect, 0.07);
+  const finalRect = clampNormalizedRect(mergedRect);
 
   const contrastRatio = clamp(Math.min(rowPeak / Math.max(rowMean, 0.001), colPeak / Math.max(colMean, 0.001)) / 5, 0, 1);
   const confidence = Number((0.45 + 0.35 * contrastRatio).toFixed(2));

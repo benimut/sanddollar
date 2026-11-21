@@ -1815,17 +1815,12 @@ onUnmounted(async () => {
         </div>
       </div>
 
-      <!-- 操作按鈕（僅保留取消與帶入表單） -->
-      <div class="pt-3 border-t border-slate-100 flex items-center justify-end space-x-2">
+      <!-- 操作按鈕（僅於可帶入表單時顯示，關閉操作統一使用右上角 ✕） -->
+      <div
+        v-if="parsedResult && scannerStep !== 'crop'"
+        class="pt-3 border-t border-slate-100 flex items-center justify-end"
+      >
         <button
-          type="button"
-          class="px-4 py-2 text-sm text-slate-600 hover:bg-slate-100 rounded-lg"
-          @click="handleClose"
-        >
-          取消
-        </button>
-        <button
-          v-if="parsedResult && scannerStep !== 'crop'"
           type="button"
           class="px-4 py-2 text-sm bg-teal-600 text-white hover:bg-teal-700 rounded-lg shadow-sm"
           @click="handleApply"

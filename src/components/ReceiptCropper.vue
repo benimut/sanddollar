@@ -76,9 +76,6 @@ const isImageLoaded = ref(false);
 /** 影像裁切與 JPEG 編碼中標記（防止快速連點） */
 const isEncoding = ref(false);
 
-/** 是否套用了傳統影像處理自動初框偵測 */
-const autoCropApplied = ref(false);
-
 /** 當前正矩形選取框（預設保留些許邊距，方便使用者立即辨識可調邊界） */
 const cropRect = ref<NormalizedRect>({
   x: 0.06,
@@ -124,13 +121,9 @@ function handleImageLoad() {
   if (!imgEl) return;
 
   const detected = detectReceiptBoundsFromImage(imgEl, props.anchorRect);
-  if (detected) {
-    cropRect.value = detected.rect;
-    autoCropApplied.value = true;
-  } else {
-    cropRect.value = { x: 0.06, y: 0.06, width: 0.88, height: 0.88 };
-    autoCropApplied.value = false;
-  }
+  cropRect.value = detected
+    ? detected.rect
+    : { x: 0.06, y: 0.06, width: 0.88, height: 0.88 };
 }
 
 /**
@@ -138,7 +131,6 @@ function handleImageLoad() {
  */
 function handleSelectFull() {
   if (props.isSubmitting) return;
-  autoCropApplied.value = false;
   cropRect.value = { x: 0, y: 0, width: 1, height: 1 };
 }
 
@@ -147,7 +139,6 @@ function handleSelectFull() {
  */
 function onPointerDown(handle: DragHandle, event: PointerEvent) {
   if (props.isSubmitting) return;
-  autoCropApplied.value = false;
   const imgEl = imageRef.value;
   if (!imgEl) return;
 
@@ -350,36 +341,17 @@ async function handleConfirmCrop() {
       {{ qrHintText }}
     </div>
 
-    <div class="flex items-center justify-between gap-2 text-xs">
-      <span class="text-teal-700 font-medium">
-        {{
-          autoCropApplied
-            ? '已自動框選發票大致範圍，可拖曳微調'
-            : '拖曳框線選取要辨識的發票範圍（正矩形）'
-        }}
-      </span>
-      <button
-        type="button"
-        :disabled="isSubmitting"
-        class="inline-flex items-center gap-1 px-2 py-1 rounded-lg text-[11px] font-medium text-slate-600 hover:bg-slate-100 disabled:opacity-50"
-        @click="handleSelectFull"
-      >
-        <Maximize2 class="w-3 h-3" />
-        <span>全選</span>
-      </button>
-    </div>
-
     <!-- 裁切預覽舞台：外層置中，內層緊貼實際圖片尺寸，確保座標 1:1 對應 -->
     <div
-      class="w-full min-h-[16rem] max-h-[48vh] bg-slate-950 rounded-xl border border-slate-200 flex items-center justify-center p-2 overflow-hidden select-none"
+      class="w-full min-h-[16rem] max-h-[58vh] bg-slate-950 rounded-xl border border-slate-200 flex items-center justify-center p-2 overflow-hidden select-none"
     >
-      <div class="relative inline-block max-w-full max-h-[44vh] overflow-hidden touch-none">
+      <div class="relative inline-block max-w-full max-h-[54vh] overflow-hidden touch-none">
         <img
           ref="imageRef"
           :src="imageDataUrl"
           alt="紙本發票拍照預覽"
           draggable="false"
-          class="block max-w-full max-h-[44vh] w-auto h-auto select-none pointer-events-none"
+          class="block max-w-full max-h-[54vh] w-auto h-auto select-none pointer-events-none"
           @load="handleImageLoad"
         />
 
@@ -491,17 +463,28 @@ async function handleConfirmCrop() {
       </div>
     </div>
 
-    <!-- 裁切操作按鈕 -->
+    <!-- 裁切操作按鈕（重拍／全選／確認範圍並辨識並排） -->
     <div class="flex items-center justify-between gap-2">
       <button
         type="button"
         data-testid="retake-photo-btn"
         :disabled="isSubmitting"
-        class="inline-flex items-center justify-center gap-1.5 px-3.5 py-2 text-xs font-semibold text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-xl transition-colors disabled:opacity-50"
+        class="shrink-0 inline-flex items-center justify-center gap-1.5 px-3 py-2 text-xs font-semibold text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-xl transition-colors disabled:opacity-50"
         @click="emit('retake')"
       >
         <RotateCcw class="w-3.5 h-3.5" />
         <span>重拍</span>
+      </button>
+
+      <button
+        type="button"
+        data-testid="select-full-btn"
+        :disabled="isSubmitting"
+        class="shrink-0 inline-flex items-center justify-center gap-1 px-3 py-2 text-xs font-semibold text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-xl transition-colors disabled:opacity-50"
+        @click="handleSelectFull"
+      >
+        <Maximize2 class="w-3.5 h-3.5" />
+        <span>全選</span>
       </button>
 
       <button

@@ -198,8 +198,8 @@ describe('InvoiceScannerModal 電子發票相機掃描驗證套件', () => {
     delete (window as unknown as { BarcodeDetector?: unknown }).BarcodeDetector;
   });
 
-  it('掃描彈窗應採純相機介面（無手動輸入框、無「解析發票」按鈕、無分類下拉選單且完整顯示相機畫面）', async () => {
-    const { container, cleanup } = mountModal();
+  it('掃描彈窗應採純相機介面（無手動輸入框、無「解析發票」與重複「取消」按鈕、無分類選單且完整顯示相機畫面）', async () => {
+    const { container, emittedEvents, cleanup } = mountModal();
     await flushAsyncWork();
 
     try {
@@ -207,10 +207,20 @@ describe('InvoiceScannerModal 電子發票相機掃描驗證套件', () => {
       expect(container.querySelector('#right-qr'), '應已移除右側手動輸入框').toBeNull();
       expect(container.querySelector('select'), '掃描階段不應出現分類下拉選單').toBeNull();
       expect(container.textContent, '底部操作列不應包含「解析發票」按鈕').not.toContain('解析發票');
+      const cancelBtn = Array.from(container.querySelectorAll('button')).find(
+        (b) => b.textContent?.trim() === '取消'
+      );
+      expect(cancelBtn, '應已移除與右上角 ✕ 重複的底部取消按鈕').toBeUndefined();
 
       const videoEl = container.querySelector('video');
       expect(videoEl, '應存在相機預覽 video 元素').not.toBeNull();
       expect(videoEl?.className, '相機預覽應採 object-contain 完整顯示不裁切').toContain('object-contain');
+
+      const closeBtn = container.querySelector('button[aria-label="關閉"]') as HTMLButtonElement;
+      expect(closeBtn, '應保留右上角關閉按鈕').not.toBeNull();
+      closeBtn.click();
+      await flushAsyncWork();
+      expect(emittedEvents.close.length).toBe(1);
     } finally {
       cleanup();
     }
@@ -682,6 +692,14 @@ describe('InvoiceScannerModal 電子發票相機掃描驗證套件', () => {
       await nextTick();
 
       const confirmBtn = container.querySelector('[data-testid="confirm-crop-btn"]') as HTMLButtonElement;
+      const selectFullBtn = container.querySelector('[data-testid="select-full-btn"]') as HTMLButtonElement;
+      const retakeBtn = container.querySelector('[data-testid="retake-photo-btn"]') as HTMLButtonElement;
+      expect(selectFullBtn, '全選按鈕應與確認範圍並排於裁切操作列').not.toBeNull();
+      expect(selectFullBtn.parentElement).toBe(confirmBtn.parentElement);
+      expect(retakeBtn.parentElement).toBe(confirmBtn.parentElement);
+      expect(container.textContent).not.toContain('已自動框選發票大致範圍');
+      expect(container.textContent).not.toContain('拖曳框線選取要辨識的發票範圍');
+
       expect(confirmBtn.disabled).toBe(false);
       confirmBtn.click();
       await flushAsyncWork(80);

@@ -89,7 +89,7 @@ function createSyntheticReceiptImage(options: {
 }
 
 describe('receiptAutoCrop 純前端紙本發票自動初框偵測套件', () => {
-  it('深色木桌背景上的淺色紙本發票應透過白紙區塊偵測準確框住發票並保留安全邊距', () => {
+  it('深色木桌背景上的淺色紙本發票應透過白紙區塊偵測緊貼框住發票且不額外外擴邊距', () => {
     const img = createSyntheticReceiptImage({
       width: 180,
       height: 220,
@@ -102,15 +102,18 @@ describe('receiptAutoCrop 純前端紙本發票自動初框偵測套件', () => 
     expect(result?.method).toBe('paper');
 
     const rect = result!.rect;
-    // 應完整包住真實發票範圍且明顯縮小於全圖
-    expect(rect.x).toBeLessThanOrEqual(42 / 180);
-    expect(rect.y).toBeLessThanOrEqual(26 / 220);
-    expect(rect.x + rect.width).toBeGreaterThanOrEqual(138 / 180);
-    expect(rect.y + rect.height).toBeGreaterThanOrEqual(188 / 220);
-    expect(rect.width).toBeLessThan(0.75);
+    // 應緊貼紙張真實邊界（容許 3×3 降噪 1~2px 微差）且不額外外擴至背景
+    expect(rect.x).toBeGreaterThanOrEqual(40 / 180);
+    expect(rect.x).toBeLessThanOrEqual(44 / 180);
+    expect(rect.y).toBeGreaterThanOrEqual(24 / 220);
+    expect(rect.y).toBeLessThanOrEqual(28 / 220);
+    expect(rect.x + rect.width).toBeGreaterThanOrEqual(136 / 180);
+    expect(rect.x + rect.width).toBeLessThanOrEqual(140 / 180);
+    expect(rect.y + rect.height).toBeGreaterThanOrEqual(186 / 220);
+    expect(rect.y + rect.height).toBeLessThanOrEqual(190 / 220);
   });
 
-  it('白色桌面背景導致紙張邊界融於背景時，應自動切換文字梯度投影框住發票內容區', () => {
+  it('白色桌面背景導致紙張邊界融於背景時，應自動切換文字梯度投影緊貼框住文字主體區', () => {
     const img = createSyntheticReceiptImage({
       width: 180,
       height: 220,
@@ -123,12 +126,12 @@ describe('receiptAutoCrop 純前端紙本發票自動初框偵測套件', () => 
     expect(result?.method).toBe('text-gradient');
 
     const rect = result!.rect;
-    // 文字主體區（發票內部 10%~92%）應完整被包在建議正矩形中
-    expect(rect.x).toBeLessThanOrEqual(58 / 180);
-    expect(rect.y).toBeLessThanOrEqual(52 / 220);
-    expect(rect.x + rect.width).toBeGreaterThanOrEqual(122 / 180);
-    expect(rect.y + rect.height).toBeGreaterThanOrEqual(168 / 220);
-    expect(rect.width).toBeLessThan(0.8);
+    // 應包住核心文字與條碼區且無過度外擴邊距
+    expect(rect.x).toBeLessThanOrEqual(62 / 180);
+    expect(rect.y).toBeLessThanOrEqual(56 / 220);
+    expect(rect.x + rect.width).toBeGreaterThanOrEqual(118 / 180);
+    expect(rect.y + rect.height).toBeGreaterThanOrEqual(162 / 220);
+    expect(rect.width).toBeLessThan(0.65);
   });
 
   it('傳入電子發票 QR 錨點座標時，自動框選結果必完整涵蓋該 QR 錨點區域', () => {
