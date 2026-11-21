@@ -21,6 +21,11 @@ import {
   type AiThinkingLevel,
 } from '@/utils/aiInvoiceSettings';
 import type { NormalizedRect } from '@/utils/receiptAutoCrop';
+import {
+  classifyCloudflareJsonResponse,
+  isBrowserOffline,
+  CLOUDFLARE_NETWORK_ERROR_MESSAGE,
+} from '@/utils/cloudflareApi';
 import ReceiptCropper, { type CroppedImagePayload } from './ReceiptCropper.vue';
 
 /** 瀏覽器原生 BarcodeDetector 單筆偵測結果介面 */
@@ -1065,7 +1070,7 @@ async function stopScanner() {
  * 僅於使用者主動點擊「✨📷 AI 辨識／補充」按鈕當下呼叫，確保離線掃 QR 完全零 API 請求。
  */
 async function checkAiAuth(): Promise<boolean> {
-  if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+  if (isBrowserOffline()) {
     errorMessage.value = '目前處於離線狀態，AI 發票辨識需要網路連線。';
     return false;
   }
@@ -1082,27 +1087,27 @@ async function checkAiAuth(): Promise<boolean> {
       cache: 'no-store',
     });
 
-    const contentType = response.headers.get('content-type') || '';
-    if (
-      response.type === 'opaqueredirect' ||
-      response.redirected ||
-      response.status === 401 ||
-      response.status === 403 ||
-      (response.status >= 300 && response.status < 400) ||
-      !contentType.toLowerCase().includes('application/json')
-    ) {
-      aiAuthState.value = 'required';
-      return false;
-    }
-
-    if (response.ok) {
+    const classified = await classifyCloudflareJsonResponse(response);
+    if (classified.kind === 'ok') {
       aiAuthState.value = 'authenticated';
       return true;
     }
 
-    aiAuthState.value = 'required';
+    if (classified.kind === 'auth_required') {
+      aiAuthState.value = 'required';
+      return false;
+    }
+
+    // 429 免費額度上限或 5xx 異常應直接顯示原因，不誤切至認證畫面
+    aiAuthState.value = 'unknown';
+    errorMessage.value = classified.message;
     return false;
   } catch {
+    if (isBrowserOffline()) {
+      aiAuthState.value = 'unknown';
+      errorMessage.value = CLOUDFLARE_NETWORK_ERROR_MESSAGE;
+      return false;
+    }
     // 跨網域 Access 登入重導向在部分瀏覽器會以 TypeError 呈現，視為尚未完成認證
     aiAuthState.value = 'required';
     return false;
@@ -1384,25 +1389,7 @@ async function handlePaperCropConfirm(payload: CroppedImagePayload) {
       body: formData,
     });
 
-    const responseContentType = response.headers.get('content-type') || '';
-
-    // 若遭遇 Cloudflare Access 未登入或過期，會收到 opaqueredirect、3xx、401/403 或 HTML 登入頁
-    if (
-      response.type === 'opaqueredirect' ||
-      response.redirected ||
-      response.status === 401 ||
-      response.status === 403 ||
-      (response.status >= 300 && response.status < 400) ||
-      !responseContentType.toLowerCase().includes('application/json')
-    ) {
-      aiAuthState.value = 'required';
-      isAuthExpired.value = true;
-      errorMessage.value =
-        '尚未完成 Cloudflare 認證或驗證已過期，請點擊下方按鈕前往認證後再試。';
-      return;
-    }
-
-    const data = (await response.json()) as {
+    const classified = await classifyCloudflareJsonResponse<{
       result?: ParsedInvoiceResult;
       meta?: {
         model?: string;
@@ -1416,9 +1403,24 @@ async function handlePaperCropConfirm(payload: CroppedImagePayload) {
         thoughtTokens?: number;
       };
       error?: string;
-    };
+    }>(response);
 
-    if (!response.ok || !data.result) {
+    // 若遭遇 Cloudflare Access 未登入或過期，保留原畫面並提示認證
+    if (classified.kind === 'auth_required') {
+      aiAuthState.value = 'required';
+      isAuthExpired.value = true;
+      errorMessage.value =
+        '尚未完成 Cloudflare 認證或驗證已過期，請點擊下方按鈕前往認證後再試。';
+      return;
+    }
+
+    if (classified.kind !== 'ok') {
+      errorMessage.value = classified.message;
+      return;
+    }
+
+    const data = classified.data;
+    if (!data.result) {
       errorMessage.value =
         data.error || `發票辨識失敗（狀態碼 ${response.status}），請確認照片清晰度後重試。`;
       return;

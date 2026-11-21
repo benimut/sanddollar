@@ -55,6 +55,11 @@ import {
 import { exportBackupData, importBackupData } from '@/utils/backup';
 import { getTodayDateString } from '@/utils/date';
 import { sortByNameNaturally } from '@/utils/sort';
+import {
+  classifyCloudflareJsonResponse,
+  isBrowserOffline,
+  CLOUDFLARE_NETWORK_ERROR_MESSAGE,
+} from '@/utils/cloudflareApi';
 import type {
   CategoryRecord,
   PaymentMethodRecord,
@@ -567,7 +572,7 @@ async function handleCloudflareLogout() {
   if (isCheckingLogout.value) return;
   cloudflareLogoutMessage.value = '';
 
-  if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+  if (isBrowserOffline()) {
     cloudflareLogoutMessage.value = '目前處於離線狀態，無法聯絡 Cloudflare 登出服務。';
     return;
   }
@@ -581,24 +586,23 @@ async function handleCloudflareLogout() {
       cache: 'no-store',
     });
 
-    const contentType = response.headers.get('content-type') || '';
-    if (
-      response.type === 'opaqueredirect' ||
-      response.redirected ||
-      response.status === 401 ||
-      response.status === 403 ||
-      (response.status >= 300 && response.status < 400) ||
-      !contentType.toLowerCase().includes('application/json') ||
-      !response.ok
-    ) {
+    const classified = await classifyCloudflareJsonResponse(response);
+    if (classified.kind === 'auth_required') {
       cloudflareLogoutMessage.value = '目前此裝置尚未授權登入 Cloudflare，無需登出。';
+      return;
+    }
+
+    if (classified.kind !== 'ok') {
+      cloudflareLogoutMessage.value = classified.message;
       return;
     }
 
     const returnTo = `${window.location.pathname}${window.location.search}` || '/';
     window.location.assign(`/api/auth?logout=1&returnTo=${encodeURIComponent(returnTo)}`);
   } catch {
-    cloudflareLogoutMessage.value = '目前此裝置尚未授權登入 Cloudflare，無需登出。';
+    cloudflareLogoutMessage.value = isBrowserOffline()
+      ? '目前處於離線狀態，無法聯絡 Cloudflare 登出服務。'
+      : '目前此裝置尚未授權登入 Cloudflare，無需登出。';
   } finally {
     isCheckingLogout.value = false;
   }
@@ -636,7 +640,7 @@ async function handleOpenBugReport() {
   bugReportStatusMessage.value = '';
   bugReportNeedsAuth.value = false;
 
-  if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+  if (isBrowserOffline()) {
     bugReportStatusMessage.value = '目前處於離線狀態，無法傳送錯誤回報。';
     return;
   }
@@ -650,28 +654,26 @@ async function handleOpenBugReport() {
       cache: 'no-store',
     });
 
-    const contentType = response.headers.get('content-type') || '';
-    if (
-      response.type === 'opaqueredirect' ||
-      response.redirected ||
-      response.status === 401 ||
-      response.status === 403 ||
-      (response.status >= 300 && response.status < 400) ||
-      !contentType.toLowerCase().includes('application/json')
-    ) {
-      bugReportNeedsAuth.value = true;
-      return;
-    }
-
-    if (response.ok) {
+    const classified = await classifyCloudflareJsonResponse(response);
+    if (classified.kind === 'ok') {
       isBugReportModalOpen.value = true;
       return;
     }
 
-    bugReportNeedsAuth.value = true;
+    if (classified.kind === 'auth_required') {
+      bugReportNeedsAuth.value = true;
+      return;
+    }
+
+    // HTTP 429 限流或 5xx 異常應明確提示，不可誤引導為未授權登入
+    bugReportStatusMessage.value = classified.message;
   } catch {
-    // 跨網域 Access 登入重導向在部分瀏覽器會以 TypeError 呈現，視為尚未完成認證
-    bugReportNeedsAuth.value = true;
+    // 跨網域 Access 登入重導向在部分瀏覽器會以 TypeError 呈現，視為尚未完成認證；若已離線則提示網路異常
+    if (isBrowserOffline()) {
+      bugReportStatusMessage.value = CLOUDFLARE_NETWORK_ERROR_MESSAGE;
+    } else {
+      bugReportNeedsAuth.value = true;
+    }
   } finally {
     isCheckingBugReportAuth.value = false;
   }
