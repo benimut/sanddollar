@@ -8,6 +8,18 @@
 import type { ExpenseRecord, IncomeRecord, MonthlyReward, FinancialSummary } from '@/types';
 
 /**
+ * 財務摘要百分比統計結果（以當期總進帳為 100% 基準）
+ */
+export interface FinancialSummaryPercentages {
+  /** 總支出佔總進帳百分比（無進帳時為 null） */
+  expenseRate: number | null;
+  /** 總進帳基準百分比（有進帳時為 100，無進帳時為 null） */
+  incomeRate: number | null;
+  /** 當期結餘佔總進帳百分比（無進帳時為 null；超支時為負值） */
+  balanceRate: number | null;
+}
+
+/**
  * 分類圓餅圖回傳資料結構
  */
 export interface CategoryPieChartData {
@@ -16,6 +28,16 @@ export interface CategoryPieChartData {
     data: number[];
     backgroundColor: string[];
   }>;
+}
+
+/**
+ * 細項圓餅圖產生選項
+ */
+export interface DetailPieOptions {
+  /** 目標篩選月份（選填，格式 YYYY-MM） */
+  targetMonth?: string;
+  /** 保留前幾大項目（預設為 5），其餘加總為「其他」 */
+  topN?: number;
 }
 
 /**
@@ -144,6 +166,11 @@ export function extractAvailableMonths(
 
 
 /**
+ * 「其他」彙總切片專用中性灰色，與前 N 大重點項目形成視覺區隔
+ */
+const OTHER_SLICE_COLOR = '#94A3B8';
+
+/**
  * 預設調色盤（提供充足色彩以供圖表輪替使用）
  */
 const DEFAULT_PALETTE: string[] = [
@@ -237,23 +264,123 @@ export function calculateFinancialSummary(
 }
 
 /**
+ * 依財務摘要計算各項百分比（以總進帳 totalIncome 為 100% 基準）
+ *
+ * 當總進帳小於等於 0 或無效時，三項比率皆回傳 null（由顯示層呈現「—」），避免除以 0。
+ *
+ * @param summary 財務摘要物件 (totalIncome, totalExpense, balance)
+ * @returns 各項百分比數值物件（單位：%）
+ */
+export function calculateSummaryPercentages(
+  summary: FinancialSummary
+): FinancialSummaryPercentages {
+  if (!summary || !Number.isFinite(summary.totalIncome) || summary.totalIncome <= 0) {
+    return {
+      expenseRate: null,
+      incomeRate: null,
+      balanceRate: null,
+    };
+  }
+
+  const totalIncome = summary.totalIncome;
+  const totalExpense = Number.isFinite(summary.totalExpense) ? summary.totalExpense : 0;
+  const balance = Number.isFinite(summary.balance) ? summary.balance : totalIncome - totalExpense;
+
+  return {
+    expenseRate: (totalExpense / totalIncome) * 100,
+    incomeRate: 100,
+    balanceRate: (balance / totalIncome) * 100,
+  };
+}
+
+/**
+ * 將百分比數值格式化為小數點後 1 位之百分比字串
+ *
+ * - 當傳入 null 或非有限數值時，回傳破折號「—」
+ * - 避免極小負數在四捨五入後顯示為「-0.0%」
+ *
+ * @param rate 百分比數值或 null
+ * @returns 格式化字串（例如 "58.3%"、"-12.5%" 或 "—"）
+ */
+export function formatSummaryPercentage(rate: number | null): string {
+  if (rate === null || !Number.isFinite(rate)) {
+    return '—';
+  }
+  const normalized = Math.abs(rate) < 0.05 ? 0 : rate;
+  return `${normalized.toFixed(1)}%`;
+}
+
+/**
+ * 自 YYYY-MM-DD 日期字串解析出 MM/DD 短日期格式
+ *
+ * @param dateStr 日期字串（例如 "2026-11-02"）
+ * @returns 短日期字串（例如 "11/02"），格式不符則回傳空字串
+ */
+function formatShortMonthDay(dateStr?: string): string {
+  if (typeof dateStr !== 'string') {
+    return '';
+  }
+  const match = dateStr.trim().match(/^\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])(?:$|T|\s)/);
+  return match ? `${match[1]}/${match[2]}` : '';
+}
+
+/**
+ * 組裝支出細項切片標籤：格式為「名稱 (商家 日期)」，缺漏欄位自動省略
+ *
+ * @param itemName 商品品項名稱
+ * @param merchant 消費商家名稱
+ * @param dateStr 消費日期字串 (YYYY-MM-DD)
+ * @returns 格式化後之切片標籤
+ */
+function formatExpenseDetailLabel(itemName?: string, merchant?: string, dateStr?: string): string {
+  const name = itemName?.trim() || '未命名品項';
+  const merchantText = merchant?.trim() || '';
+  const shortDate = formatShortMonthDay(dateStr);
+  const meta = [merchantText, shortDate].filter(Boolean).join(' ');
+  return meta ? `${name} (${meta})` : name;
+}
+
+/**
+ * 組裝收入細項切片標籤：格式為「來源 (日期)」，無有效日期時僅顯示來源名稱
+ *
+ * @param sourceName 收入來源名稱
+ * @param dateStr 收入日期字串 (YYYY-MM-DD)
+ * @returns 格式化後之切片標籤
+ */
+function formatIncomeDetailLabel(sourceName?: string, dateStr?: string): string {
+  const source = sourceName?.trim() || '未命名收入';
+  const shortDate = formatShortMonthDay(dateStr);
+  return shortDate ? `${source} (${shortDate})` : source;
+}
+
+/**
  * 產生收支分類圓餅圖資料
- * 
+ *
+ * 支援選填 targetMonth 依指定月份篩選；未傳入時維持全量統計以向下相容。
+ *
  * @param expenses 消費支出記錄列表
  * @param incomes 收入記錄列表
  * @param mode 圖表模式：'expense' (支出) 或 'income' (收入)
+ * @param targetMonth 目標篩選月份（選填，格式 YYYY-MM）
  * @returns 圓餅圖所需 labels 與 datasets 結構
  */
 export function generateCategoryPieData(
   expenses: ExpenseRecord[],
   incomes: IncomeRecord[],
-  mode: 'expense' | 'income'
+  mode: 'expense' | 'income',
+  targetMonth?: string
 ): CategoryPieChartData {
+  const monthFilter = targetMonth?.trim();
+  const hasMonthFilter = Boolean(monthFilter && monthFilter.length > 0);
   const categoryMap = new Map<string, number>();
 
   if (mode === 'expense') {
+    const targetExpenses = hasMonthFilter
+      ? (expenses || []).filter((exp) => typeof exp?.date === 'string' && exp.date.startsWith(monthFilter!))
+      : (expenses || []);
+
     // 統計支出品項分類加總
-    for (const exp of expenses) {
+    for (const exp of targetExpenses) {
       if (!exp.items || exp.items.length === 0) {
         continue;
       }
@@ -264,8 +391,12 @@ export function generateCategoryPieData(
       }
     }
   } else {
+    const targetIncomes = hasMonthFilter
+      ? (incomes || []).filter((inc) => typeof inc?.date === 'string' && inc.date.startsWith(monthFilter!))
+      : (incomes || []);
+
     // 統計收入分類加總
-    for (const inc of incomes) {
+    for (const inc of targetIncomes) {
       const cat = inc.category?.trim() || '其他';
       const currentAmount = categoryMap.get(cat) || 0;
       categoryMap.set(cat, currentAmount + (inc.amount || 0));
@@ -283,6 +414,114 @@ export function generateCategoryPieData(
     data.push(categoryMap.get(label) || 0);
     backgroundColor.push(getColor(index));
   });
+
+  return {
+    labels,
+    datasets: [
+      {
+        data,
+        backgroundColor,
+      },
+    ],
+  };
+}
+
+/**
+ * 產生收支細項圓餅圖資料（僅保留前 N 大，其餘加總為「其他」）
+ *
+ * - 支出模式：拆解每筆消費記錄中的正向商品明細品項（subtotal > 0），標籤為「名稱 (商家 日期)」。
+ * - 收入模式：以每筆正向收入記錄（amount > 0）作圖，標籤為「來源 (日期)」。
+ * - 排序與彙總：依金額由大到小排序，保留前 topN（預設 5）大項目；若總數超過 topN，
+ *   將第 topN + 1 筆以後全部加總為單一「其他」切片（中性灰色）。
+ *
+ * @param expenses 消費支出記錄列表
+ * @param incomes 收入記錄列表
+ * @param mode 圖表模式：'expense' (支出) 或 'income' (收入)
+ * @param options 選項設定（targetMonth 月份篩選、topN 前幾大上限）
+ * @returns 圓餅圖所需 labels 與 datasets 結構
+ */
+export function generateDetailPieData(
+  expenses: ExpenseRecord[],
+  incomes: IncomeRecord[],
+  mode: 'expense' | 'income',
+  options?: DetailPieOptions
+): CategoryPieChartData {
+  const monthFilter = options?.targetMonth?.trim();
+  const hasMonthFilter = Boolean(monthFilter && monthFilter.length > 0);
+  const rawTopN = options?.topN;
+  const topN =
+    typeof rawTopN === 'number' && Number.isFinite(rawTopN) && rawTopN >= 1
+      ? Math.floor(rawTopN)
+      : 5;
+
+  const entries: Array<{ label: string; amount: number }> = [];
+
+  if (mode === 'expense') {
+    const targetExpenses = hasMonthFilter
+      ? (expenses || []).filter((exp) => typeof exp?.date === 'string' && exp.date.startsWith(monthFilter!))
+      : (expenses || []);
+
+    for (const exp of targetExpenses) {
+      if (!exp?.items || exp.items.length === 0) {
+        continue;
+      }
+      for (const item of exp.items) {
+        const amount = Number(item?.subtotal);
+        if (!Number.isFinite(amount) || amount <= 0) {
+          continue;
+        }
+        entries.push({
+          label: formatExpenseDetailLabel(item?.name, exp.merchant, exp.date),
+          amount,
+        });
+      }
+    }
+  } else {
+    const targetIncomes = hasMonthFilter
+      ? (incomes || []).filter((inc) => typeof inc?.date === 'string' && inc.date.startsWith(monthFilter!))
+      : (incomes || []);
+
+    for (const inc of targetIncomes) {
+      const amount = Number(inc?.amount);
+      if (!Number.isFinite(amount) || amount <= 0) {
+        continue;
+      }
+      entries.push({
+        label: formatIncomeDetailLabel(inc?.source, inc?.date),
+        amount,
+      });
+    }
+  }
+
+  // 依金額降冪排序（金額相同維持原始順序）
+  entries.sort((a, b) => b.amount - a.amount);
+
+  const labels: string[] = [];
+  const data: number[] = [];
+  const backgroundColor: string[] = [];
+
+  if (entries.length <= topN) {
+    entries.forEach((entry, index) => {
+      labels.push(entry.label);
+      data.push(entry.amount);
+      backgroundColor.push(getColor(index));
+    });
+  } else {
+    const topEntries = entries.slice(0, topN);
+    const otherAmount = entries.slice(topN).reduce((sum, entry) => sum + entry.amount, 0);
+
+    topEntries.forEach((entry, index) => {
+      labels.push(entry.label);
+      data.push(entry.amount);
+      backgroundColor.push(getColor(index));
+    });
+
+    if (otherAmount > 0) {
+      labels.push('其他');
+      data.push(otherAmount);
+      backgroundColor.push(OTHER_SLICE_COLOR);
+    }
+  }
 
   return {
     labels,

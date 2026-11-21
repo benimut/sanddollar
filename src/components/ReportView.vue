@@ -4,8 +4,8 @@
  * @description 財務報表與視覺化圖表檢視元件
  *
  * 核心業務職責：
- * 1. 財務核心摘要卡片：呈現總進帳 (totalIncome)、總支出 (totalExpense) 與當期結餘 (balance)。
- * 2. 分類比例圓餅圖：整合 Chart.js PieController，動態呼叫 generateCategoryPieData，支援支出/收入分類佔比即時切換。
+ * 1. 財務核心摘要卡片：呈現總進帳 (totalIncome)、總支出 (totalExpense) 與當期結餘 (balance)，支援金額與百分比（以總進帳為 100% 基準）即時切換。
+ * 2. 收支佔比圓餅圖：整合 Chart.js PieController，連動當月篩選，支援「分類 / 細項」與「支出 / 收入」切換；細項模式僅保留前 5 大並將其餘加總為「其他」。
  * 3. 每月收支堆疊長條圖：整合 Chart.js BarController 與 generateStackedBarData，呈現並排雙柱堆疊分析（收入/回饋 vs 支出）。
  * 4. 自訂起訖月份區間篩選：支援快選（近3個月、近6個月、近12個月、全部）與精確手動輸入起訖月份 (#report-start-month, #report-end-month)。
  */
@@ -26,7 +26,10 @@ import { getExpenses, getIncomes, getRewards } from '@/db';
 import { getCurrentMonthString, shiftMonth } from '@/utils/date';
 import {
   calculateFinancialSummary,
+  calculateSummaryPercentages,
+  formatSummaryPercentage,
   generateCategoryPieData,
+  generateDetailPieData,
   generateStackedBarData,
   extractAvailableMonths,
   expandMonthRange,
@@ -66,6 +69,18 @@ const defaultEndMonth = `${currentYear}-12`;
 // 財務摘要選取之月份（必填，預設為當前月份）
 const selectedMonth = ref<string>(currentMonth);
 
+// 財務摘要顯示單位：'amount' (金額) | 'percent' (百分比)
+const summaryDisplayMode = ref<'amount' | 'percent'>('amount');
+
+// 依當期財務摘要計算百分比（以總進帳為 100% 基準）
+const summaryPercentages = computed(() => calculateSummaryPercentages(summary.value));
+const hasSummaryIncome = computed(() => summaryPercentages.value.incomeRate !== null);
+const summaryPercentDisplay = computed(() => ({
+  expense: formatSummaryPercentage(summaryPercentages.value.expenseRate),
+  income: formatSummaryPercentage(summaryPercentages.value.incomeRate),
+  balance: formatSummaryPercentage(summaryPercentages.value.balanceRate),
+}));
+
 // 長條圖自訂區間篩選月份狀態（必填，預設為今年 01~12 月）
 const rangeStartMonth = ref<string>(defaultStartMonth);
 const rangeEndMonth = ref<string>(defaultEndMonth);
@@ -84,8 +99,11 @@ const availableMonths = computed<string[]>(() => {
   });
 });
 
-// 圓餅圖模式：'expense' | 'income'
+// 圓餅圖收支模式：'expense' | 'income'
 const pieMode = ref<'expense' | 'income'>('expense');
+// 圓餅圖統計維度：'category' (分類) | 'detail' (細項，前 5 大 + 其他)
+const pieScope = ref<'category' | 'detail'>('category');
+const pieTitle = computed(() => (pieScope.value === 'category' ? '收支分類佔比' : '收支細項佔比'));
 
 // Canvas 參考
 const pieCanvasRef = ref<HTMLCanvasElement | null>(null);
@@ -159,7 +177,7 @@ async function loadData() {
 }
 
 /**
- * 渲染或更新分類圓餅圖
+ * 渲染或更新收支圓餅圖（連動 selectedMonth，支援分類與細項模式切換）
  */
 function renderPieChart() {
   if (!pieCanvasRef.value) return;
@@ -169,17 +187,27 @@ function renderPieChart() {
     pieChartInstance = null;
   }
 
-  const pieData = generateCategoryPieData(
-    expenses.value,
-    incomes.value,
-    pieMode.value
-  );
+  const pieData =
+    pieScope.value === 'detail'
+      ? generateDetailPieData(expenses.value, incomes.value, pieMode.value, {
+          targetMonth: selectedMonth.value,
+          topN: 5,
+        })
+      : generateCategoryPieData(
+          expenses.value,
+          incomes.value,
+          pieMode.value,
+          selectedMonth.value
+        );
 
   const ctx = pieCanvasRef.value.getContext('2d');
   if (!ctx) return;
 
   // 若無資料時提供佔位數據
   const hasData = pieData.datasets[0] && pieData.datasets[0].data.length > 0;
+  const pieTotal = hasData
+    ? pieData.datasets[0].data.reduce((sum, value) => sum + (Number(value) || 0), 0)
+    : 0;
   const chartData = hasData
     ? pieData
     : {
@@ -212,7 +240,10 @@ function renderPieChart() {
           callbacks: {
             label: (item) => {
               if (!hasData) return ' 尚無資料';
-              return ` NT$ ${item.raw}`;
+              const val = Number(item.raw) || 0;
+              const pctText =
+                pieTotal > 0 ? ` (${((val / pieTotal) * 100).toFixed(1)}%)` : '';
+              return ` ${item.label}: NT$ ${val}${pctText}`;
             },
           },
         },
@@ -335,17 +366,18 @@ function renderBarChart() {
   });
 }
 
-// 監聽 selectedMonth 變更即時重算財務摘要（不可為空，若被清空則自動重設為當月）
+// 監聽 selectedMonth 變更即時重算財務摘要並同步重繪圓餅圖（不可為空，若被清空則自動重設為當月）
 watch(selectedMonth, (val) => {
   if (!val) {
     selectedMonth.value = currentMonth;
     return;
   }
   updateSummary();
+  renderPieChart();
 });
 
-// 監聽圓餅圖模式即時重繪圓餅圖
-watch(pieMode, () => {
+// 監聽圓餅圖模式或統計維度變更即時重繪圓餅圖
+watch([pieMode, pieScope], () => {
   renderPieChart();
 });
 
@@ -384,37 +416,85 @@ onUnmounted(() => {
   <div class="space-y-4">
     <!-- ==================== 財務核心摘要卡片 ==================== -->
     <div class="bg-white rounded-2xl p-5 shadow-sm border border-slate-100 space-y-4">
-      <div class="flex items-center justify-between">
+      <div class="flex flex-wrap items-center justify-between gap-2">
         <h2 class="text-base font-bold text-slate-800">財務核心摘要</h2>
 
-        <!-- 月份下拉選單 (依月份降冪排序，必填) -->
-        <select
-          id="summary-month-select"
-          v-model="selectedMonth"
-          required
-          class="text-xs border border-slate-200 rounded-lg px-2.5 py-1 bg-slate-50 text-slate-700 font-medium focus:ring-2 focus:ring-teal-500 focus:outline-none"
-        >
-          <option v-for="m in availableMonths" :key="m" :value="m">{{ m }}</option>
-        </select>
+        <div class="flex items-center gap-2">
+          <!-- 顯示單位切換：金額 / 百分比 -->
+          <div
+            role="group"
+            aria-label="摘要顯示單位"
+            class="flex rounded-lg bg-slate-100 p-0.5 text-xs font-medium"
+          >
+            <button
+              type="button"
+              :aria-pressed="summaryDisplayMode === 'amount'"
+              class="min-h-[28px] px-2.5 py-1 rounded-md transition-all focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-teal-600"
+              :class="
+                summaryDisplayMode === 'amount'
+                  ? 'bg-white text-teal-700 font-bold shadow-sm'
+                  : 'text-slate-500 hover:text-slate-800'
+              "
+              @click="summaryDisplayMode = 'amount'"
+            >
+              金額
+            </button>
+            <button
+              type="button"
+              :aria-pressed="summaryDisplayMode === 'percent'"
+              class="min-h-[28px] px-2.5 py-1 rounded-md transition-all focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-teal-600"
+              :class="
+                summaryDisplayMode === 'percent'
+                  ? 'bg-white text-teal-700 font-bold shadow-sm'
+                  : 'text-slate-500 hover:text-slate-800'
+              "
+              @click="summaryDisplayMode = 'percent'"
+            >
+              百分比
+            </button>
+          </div>
+
+          <!-- 月份下拉選單 (依月份降冪排序，必填) -->
+          <select
+            id="summary-month-select"
+            v-model="selectedMonth"
+            aria-label="選擇財務摘要月份"
+            required
+            class="min-h-[28px] text-xs border border-slate-200 rounded-lg px-2.5 py-1 bg-slate-50 text-slate-700 font-medium focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-teal-600"
+          >
+            <option v-for="m in availableMonths" :key="m" :value="m">{{ m }}</option>
+          </select>
+        </div>
       </div>
 
       <!-- 核心三欄數據網格 -->
       <div class="grid grid-cols-3 gap-3">
         <!-- 總支出 -->
-        <div class="bg-rose-50/60 rounded-xl p-3 text-center border border-rose-100">
+        <div
+          class="bg-rose-50/60 rounded-xl p-3 text-center border border-rose-100"
+          data-testid="summary-expense-card"
+        >
           <span class="block text-xs text-rose-600 font-medium mb-1">總支出</span>
-          <span class="text-base font-extrabold text-rose-700">NT$ {{ summary.totalExpense }}</span>
+          <span class="text-base font-extrabold text-rose-700">
+            {{ summaryDisplayMode === 'amount' ? `NT$ ${summary.totalExpense}` : summaryPercentDisplay.expense }}
+          </span>
         </div>
 
         <!-- 總進帳 -->
-        <div class="bg-emerald-50/60 rounded-xl p-3 text-center border border-emerald-100">
+        <div
+          class="bg-emerald-50/60 rounded-xl p-3 text-center border border-emerald-100"
+          data-testid="summary-income-card"
+        >
           <span class="block text-xs text-emerald-600 font-medium mb-1">總進帳</span>
-          <span class="text-base font-extrabold text-emerald-700">NT$ {{ summary.totalIncome }}</span>
+          <span class="text-base font-extrabold text-emerald-700">
+            {{ summaryDisplayMode === 'amount' ? `NT$ ${summary.totalIncome}` : summaryPercentDisplay.income }}
+          </span>
         </div>
 
         <!-- 當期結餘 -->
         <div
           class="rounded-xl p-3 text-center border"
+          data-testid="summary-balance-card"
           :class="
             summary.balance >= 0
               ? 'bg-teal-50/60 border-teal-100 text-teal-800'
@@ -422,38 +502,122 @@ onUnmounted(() => {
           "
         >
           <span class="block text-xs font-medium mb-1">當期結餘</span>
-          <span class="text-base font-extrabold">NT$ {{ summary.balance }}</span>
+          <span class="text-base font-extrabold">
+            {{ summaryDisplayMode === 'amount' ? `NT$ ${summary.balance}` : summaryPercentDisplay.balance }}
+          </span>
         </div>
       </div>
+
+      <p
+        v-if="summaryDisplayMode === 'percent'"
+        class="text-[11px] text-slate-500 text-right"
+        data-testid="summary-percent-note"
+      >
+        {{ hasSummaryIncome ? '以當月總進帳為 100% 基準' : '當月無進帳紀錄，無法計算百分比' }}
+      </p>
     </div>
 
-    <!-- ==================== 收支分類圓餅圖 ==================== -->
-    <div class="bg-white rounded-2xl p-5 shadow-sm border border-slate-100 space-y-4">
-      <div class="flex items-center justify-between">
-        <h3 class="text-base font-bold text-slate-800">收支分類佔比</h3>
-        <!-- 切換按鈕：支出分類 / 收入分類 -->
-        <div class="flex rounded-lg bg-slate-100 p-0.5 text-xs font-medium">
-          <button
-            type="button"
-            class="px-2.5 py-1 rounded-md transition-all"
-            :class="pieMode === 'expense' ? 'bg-white text-teal-700 font-bold shadow-sm' : 'text-slate-500 hover:text-slate-800'"
-            @click="pieMode = 'expense'"
+    <!-- ==================== 收支圓餅圖（分類 / 細項） ==================== -->
+    <div class="bg-white rounded-2xl p-5 shadow-sm border border-slate-100 space-y-3">
+      <div class="flex flex-wrap items-center justify-between gap-2">
+        <div class="flex items-center gap-2">
+          <h3 class="text-base font-bold text-slate-800">{{ pieTitle }}</h3>
+          <span
+            class="text-[11px] font-medium px-2 py-0.5 rounded-full bg-slate-100 text-slate-600"
+            data-testid="pie-month-badge"
           >
-            支出分類
-          </button>
-          <button
-            type="button"
-            class="px-2.5 py-1 rounded-md transition-all"
-            :class="pieMode === 'income' ? 'bg-white text-teal-700 font-bold shadow-sm' : 'text-slate-500 hover:text-slate-800'"
-            @click="pieMode = 'income'"
+            {{ selectedMonth }}
+          </span>
+        </div>
+
+        <div class="flex flex-wrap items-center gap-2">
+          <!-- 統計維度切換：分類 / 細項 -->
+          <div
+            role="group"
+            aria-label="圓餅圖統計維度"
+            class="flex rounded-lg bg-slate-100 p-0.5 text-xs font-medium"
           >
-            收入分類
-          </button>
+            <button
+              type="button"
+              :aria-pressed="pieScope === 'category'"
+              class="min-h-[28px] px-2.5 py-1 rounded-md transition-all focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-teal-600"
+              :class="
+                pieScope === 'category'
+                  ? 'bg-white text-teal-700 font-bold shadow-sm'
+                  : 'text-slate-500 hover:text-slate-800'
+              "
+              @click="pieScope = 'category'"
+            >
+              分類
+            </button>
+            <button
+              type="button"
+              :aria-pressed="pieScope === 'detail'"
+              class="min-h-[28px] px-2.5 py-1 rounded-md transition-all focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-teal-600"
+              :class="
+                pieScope === 'detail'
+                  ? 'bg-white text-teal-700 font-bold shadow-sm'
+                  : 'text-slate-500 hover:text-slate-800'
+              "
+              @click="pieScope = 'detail'"
+            >
+              細項
+            </button>
+          </div>
+
+          <!-- 收支類型切換：支出 / 收入 -->
+          <div
+            role="group"
+            aria-label="圓餅圖收支類型"
+            class="flex rounded-lg bg-slate-100 p-0.5 text-xs font-medium"
+          >
+            <button
+              type="button"
+              :aria-pressed="pieMode === 'expense'"
+              class="min-h-[28px] px-2.5 py-1 rounded-md transition-all focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-teal-600"
+              :class="
+                pieMode === 'expense'
+                  ? 'bg-white text-teal-700 font-bold shadow-sm'
+                  : 'text-slate-500 hover:text-slate-800'
+              "
+              @click="pieMode = 'expense'"
+            >
+              {{ pieScope === 'category' ? '支出分類' : '支出細項' }}
+            </button>
+            <button
+              type="button"
+              :aria-pressed="pieMode === 'income'"
+              class="min-h-[28px] px-2.5 py-1 rounded-md transition-all focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-teal-600"
+              :class="
+                pieMode === 'income'
+                  ? 'bg-white text-teal-700 font-bold shadow-sm'
+                  : 'text-slate-500 hover:text-slate-800'
+              "
+              @click="pieMode = 'income'"
+            >
+              {{ pieScope === 'category' ? '收入分類' : '收入細項' }}
+            </button>
+          </div>
         </div>
       </div>
 
+      <p
+        v-if="pieScope === 'detail'"
+        class="text-[11px] text-slate-500"
+        data-testid="pie-detail-note"
+      >
+        {{
+          pieMode === 'expense'
+            ? '依當月每筆消費商品明細作圖，僅保留前 5 大項目，其餘加總為「其他」'
+            : '依當月每筆收入記錄作圖，僅保留前 5 大項目，其餘加總為「其他」'
+        }}
+      </p>
+
       <!-- 圓餅圖畫布容器 -->
-      <div class="h-64 relative flex items-center justify-center">
+      <div
+        class="relative flex items-center justify-center"
+        :class="pieScope === 'detail' ? 'h-72' : 'h-64'"
+      >
         <canvas ref="pieCanvasRef" class="w-full h-full"></canvas>
       </div>
     </div>
