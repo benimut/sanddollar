@@ -1130,7 +1130,7 @@ const MAX_BUG_DESCRIPTION_LENGTH = 4000;
 const GITHUB_API_VERSION = '2022-11-28';
 
 /** 支援之錯誤回報問題類型白名單 */
-type BugReportCategory = 'bug' | 'ui' | 'ai-invoice' | 'enhancement';
+type BugReportCategory = 'bug' | 'ui' | 'ai-invoice' | 'enhancement' | 'other';
 
 /** 各問題類型對應之 Issue 標題前綴與 GitHub Labels */
 const BUG_REPORT_CATEGORY_CONFIG: Record<
@@ -1141,12 +1141,14 @@ const BUG_REPORT_CATEGORY_CONFIG: Record<
   ui: { prefix: '畫面顯示', labels: ['bug', 'ui', 'user-report'] },
   'ai-invoice': { prefix: 'AI 發票辨識', labels: ['bug', 'ai-invoice', 'user-report'] },
   enhancement: { prefix: '功能建議', labels: ['enhancement', 'user-report'] },
+  other: { prefix: '其他', labels: ['user-report'] },
 };
 
 /** 清洗後之可選環境診斷資訊結構 */
 interface SanitizedBugDiagnostics {
   appVersion?: string;
   reportedAt?: string;
+  browserSummary?: string;
   userAgent?: string;
   viewport?: string;
   displayMode?: string;
@@ -1190,6 +1192,9 @@ function sanitizeDiagnostics(raw: unknown): SanitizedBugDiagnostics | null {
 
   const reportedAt = sanitizeSingleLine(obj.reportedAt, 64);
   if (reportedAt) cleaned.reportedAt = reportedAt;
+
+  const browserSummary = sanitizeSingleLine(obj.browserSummary, 120);
+  if (browserSummary) cleaned.browserSummary = browserSummary;
 
   const userAgent = sanitizeSingleLine(obj.userAgent, 300);
   if (userAgent) cleaned.userAgent = userAgent;
@@ -1320,12 +1325,17 @@ function buildGitHubIssueBody(data: ExtractedBugReportRequest): string {
     const diagRows: Array<[string, string | undefined]> = [
       ['App 版本', data.diagnostics.appVersion],
       ['回報時間', data.diagnostics.reportedAt],
+      ['裝置與瀏覽器', data.diagnostics.browserSummary],
       ['PWA 顯示模式', data.diagnostics.displayMode],
       ['螢幕／視窗尺寸', data.diagnostics.viewport],
       ['系統語系', data.diagnostics.language],
       ['AI 發票設定', data.diagnostics.aiSettings],
-      ['瀏覽器 User-Agent', data.diagnostics.userAgent],
     ];
+
+    // 若舊呼叫端僅提供 userAgent 而無 browserSummary，則相容列於主表
+    if (!data.diagnostics.browserSummary && data.diagnostics.userAgent) {
+      diagRows.push(['瀏覽器 User-Agent', data.diagnostics.userAgent]);
+    }
 
     const populatedRows = diagRows.filter(([, val]) => Boolean(val));
     if (populatedRows.length > 0) {
@@ -1333,6 +1343,20 @@ function buildGitHubIssueBody(data: ExtractedBugReportRequest): string {
       for (const [label, val] of populatedRows) {
         sections.push(`| ${label} | ${escapeMarkdownCell(val as string)} |`);
       }
+    }
+
+    // 保留完整原始 User-Agent 於折疊備註區塊，兼顧主表精簡與深度排查需求
+    if (data.diagnostics.browserSummary && data.diagnostics.userAgent) {
+      const safeUa = data.diagnostics.userAgent.replace(/`/g, "'");
+      sections.push(
+        '',
+        '<details>',
+        '<summary>完整瀏覽器 User-Agent（備註）</summary>',
+        '',
+        `\`${safeUa}\``,
+        '',
+        '</details>'
+      );
     }
   }
 
@@ -1412,7 +1436,7 @@ async function handleReportBug(request: Request, env: Env): Promise<Response> {
   }
 
   const config = BUG_REPORT_CATEGORY_CONFIG[extracted.data.category];
-  const issueTitle = `[${config.prefix}] ${extracted.data.title}`;
+  const issueTitle = `[bot-${config.prefix}] ${extracted.data.title}`;
   const issueBody = buildGitHubIssueBody(extracted.data);
   const endpoint = `https://api.github.com/repos/${owner}/${repo}/issues`;
 

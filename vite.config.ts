@@ -1,6 +1,7 @@
 import { defineConfig } from 'vite';
 import vue from '@vitejs/plugin-vue';
 import { VitePWA } from 'vite-plugin-pwa';
+import { execSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'path';
 
@@ -20,7 +21,30 @@ function readPackageVersion(): string {
   return '1.0.0';
 }
 
-const appVersion = readPackageVersion();
+/** 擷取建置當下之 Git Commit 7 碼短碼（優先使用 CI 注入之 GITHUB_SHA） */
+function readGitShortSha(): string {
+  const envSha = (process.env.GITHUB_SHA || '').trim();
+  if (/^[0-9a-f]{7,40}$/i.test(envSha)) {
+    return envSha.slice(0, 7);
+  }
+  try {
+    const out = execSync('git rev-parse --short=7 HEAD', {
+      cwd: __dirname,
+      stdio: ['ignore', 'pipe', 'ignore'],
+      encoding: 'utf-8',
+    }).trim();
+    if (/^[0-9a-f]{7,40}$/i.test(out)) {
+      return out.slice(0, 7);
+    }
+  } catch {
+    // 非 Git 工作目錄環境下安全略過
+  }
+  return '';
+}
+
+const baseVersion = readPackageVersion();
+const gitShortSha = readGitShortSha();
+const appVersion = gitShortSha ? `${baseVersion} (${gitShortSha})` : baseVersion;
 
 // https://vitejs.dev/config/
 export default defineConfig({

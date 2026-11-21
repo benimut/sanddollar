@@ -17,12 +17,13 @@ import { ref, computed, watch, onMounted, nextTick } from 'vue';
 import { loadAiInvoiceSettings } from '@/utils/aiInvoiceSettings';
 
 /** 支援之錯誤回報問題類型 */
-export type BugReportCategory = 'bug' | 'ui' | 'ai-invoice' | 'enhancement';
+export type BugReportCategory = 'bug' | 'ui' | 'ai-invoice' | 'enhancement' | 'other';
 
 /** 診斷資訊資料結構（嚴格限制不含任何記帳資料） */
 interface BugDiagnosticsPayload {
   appVersion: string;
   reportedAt: string;
+  browserSummary: string;
   userAgent: string;
   viewport: string;
   displayMode: string;
@@ -47,11 +48,13 @@ const CATEGORY_OPTIONS: ReadonlyArray<{
   value: BugReportCategory;
   label: string;
   hint: string;
+  fullWidth?: boolean;
 }> = [
   { value: 'bug', label: '功能異常', hint: '操作失敗、計算錯誤或無法儲存' },
   { value: 'ui', label: '畫面顯示', hint: '版面跑版、文字裁切或捲動異常' },
   { value: 'ai-invoice', label: 'AI 發票辨識', hint: '拍照裁切、QR 掃描或辨識誤差' },
   { value: 'enhancement', label: '功能建議', hint: '體驗改善或新功能許願' },
+  { value: 'other', label: '其他', hint: '使用疑問或其他想回饋的事項', fullWidth: true },
 ];
 
 const props = defineProps<{
@@ -116,8 +119,103 @@ const descriptionDescribedBy = computed(() =>
     : 'bug-report-description-hint'
 );
 
-/** 即時組裝環境診斷資訊（供預覽與送出使用，絕不存取 IndexedDB 記帳資料） */
-const diagnosticsSnapshot = computed<BugDiagnosticsPayload>(() => {
+/**
+ * 格式化本地日期時間與時區偏移（例如：2026-11-21 15:05:48 (UTC+8)）
+ */
+function formatLocalTimestamp(date: Date): string {
+  const pad = (n: number) => String(n).padStart(2, '0');
+  const y = date.getFullYear();
+  const m = pad(date.getMonth() + 1);
+  const d = pad(date.getDate());
+  const hh = pad(date.getHours());
+  const mm = pad(date.getMinutes());
+  const ss = pad(date.getSeconds());
+
+  // getTimezoneOffset() 回傳 UTC 與本地分鐘差（台灣 UTC+8 為 -480）
+  const offsetMinutes = -date.getTimezoneOffset();
+  const sign = offsetMinutes >= 0 ? '+' : '-';
+  const absMinutes = Math.abs(offsetMinutes);
+  const offsetHours = Math.floor(absMinutes / 60);
+  const offsetRemMinutes = absMinutes % 60;
+  const tzLabel =
+    offsetRemMinutes === 0
+      ? `UTC${sign}${offsetHours}`
+      : `UTC${sign}${offsetHours}:${pad(offsetRemMinutes)}`;
+
+  return `${y}-${m}-${d} ${hh}:${mm}:${ss} (${tzLabel})`;
+}
+
+/**
+ * 將瀏覽器原始 User-Agent 與 userAgentData 解析為精簡可讀摘要（例如：Android (Mobile) · Chrome 157）
+ */
+function buildBrowserSummary(ua: string): string {
+  if (!ua || ua === 'unknown') return '未知裝置與瀏覽器';
+
+  const uaData =
+    typeof navigator !== 'undefined'
+      ? (
+          navigator as unknown as {
+            userAgentData?: {
+              platform?: string;
+              mobile?: boolean;
+            };
+          }
+        ).userAgentData
+      : undefined;
+
+  // 1. 辨識作業系統與裝置形態
+  const platformRaw = typeof uaData?.platform === 'string' ? uaData.platform.trim() : '';
+  let os = '';
+  if (/android/i.test(platformRaw) || /Android/i.test(ua)) {
+    os = 'Android';
+  } else if (/iPhone|iPad|iPod/i.test(ua) || /iOS/i.test(platformRaw)) {
+    os = /iPad/i.test(ua) ? 'iPadOS' : 'iOS';
+  } else if (/Windows/i.test(platformRaw) || /Windows NT/i.test(ua)) {
+    os = 'Windows';
+  } else if (/macOS|Mac/i.test(platformRaw) || /Macintosh|Mac OS X/i.test(ua)) {
+    os = 'macOS';
+  } else if (/CrOS/i.test(ua)) {
+    os = 'ChromeOS';
+  } else if (/Linux/i.test(platformRaw) || /Linux/i.test(ua)) {
+    os = 'Linux';
+  } else {
+    os = platformRaw || '未知系統';
+  }
+
+  const isTablet = /iPad|Tablet/i.test(ua) || (/Android/i.test(ua) && !/Mobile/i.test(ua));
+  const isMobile =
+    typeof uaData?.mobile === 'boolean'
+      ? uaData.mobile
+      : /Mobile|iPhone|iPod|Android.*Mobile/i.test(ua);
+  const formFactor = isTablet ? 'Tablet' : isMobile ? 'Mobile' : 'Desktop';
+
+  // 2. 依優先順序擷取實際瀏覽器名稱與主版本，避開通用 Safari/AppleWebKit 尾綴
+  const browserMatchers: Array<{ name: string; regex: RegExp }> = [
+    { name: 'Edge', regex: /\bEdg(?:A|iOS)?\/(\d+)/ },
+    { name: 'Opera', regex: /\bOPR\/(\d+)/ },
+    { name: 'Samsung Internet', regex: /\bSamsungBrowser\/(\d+)/ },
+    { name: 'LINE', regex: /\bLine\/(\d+)/i },
+    { name: 'Firefox', regex: /\b(?:Firefox|FxiOS)\/(\d+)/ },
+    { name: 'Chrome', regex: /\b(?:Chrome|CriOS)\/(\d+)/ },
+    { name: 'Safari', regex: /\bVersion\/(\d+)(?:\.\d+)*.*Safari\// },
+  ];
+
+  let browserLabel = '未知瀏覽器';
+  for (const matcher of browserMatchers) {
+    const match = matcher.regex.exec(ua);
+    if (match?.[1]) {
+      browserLabel = `${matcher.name} ${match[1]}`;
+      break;
+    }
+  }
+
+  return `${os} (${formFactor}) · ${browserLabel}`;
+}
+
+/**
+ * 產生當下最新之環境診斷資訊（送出時呼叫以確保時間與設定皆為最新狀態，絕不存取記帳資料）
+ */
+function buildDiagnosticsPayload(): BugDiagnosticsPayload {
   const ai = loadAiInvoiceSettings();
   const appVersion =
     typeof import.meta.env.VITE_APP_VERSION === 'string' && import.meta.env.VITE_APP_VERSION.trim()
@@ -150,13 +248,21 @@ const diagnosticsSnapshot = computed<BugDiagnosticsPayload>(() => {
 
   return {
     appVersion,
-    reportedAt: new Date().toISOString(),
+    reportedAt: formatLocalTimestamp(new Date()),
+    browserSummary: buildBrowserSummary(ua),
     userAgent: ua,
     viewport,
     displayMode,
     language: lang,
     aiSettings: `${ai.model} / ${ai.thinkingLevel} / ${ai.mediaResolution}`,
   };
+}
+
+/** 供表單預覽區顯示的診斷資訊快照（隨彈窗開啟時刷新） */
+const diagnosticsPreviewTick = ref(0);
+const diagnosticsSnapshot = computed<BugDiagnosticsPayload>(() => {
+  void diagnosticsPreviewTick.value;
+  return buildDiagnosticsPayload();
 });
 
 /**
@@ -168,7 +274,13 @@ function restoreDraftFromStorage() {
     const raw = window.sessionStorage.getItem(BUG_REPORT_DRAFT_STORAGE_KEY);
     if (!raw) return;
     const parsed = JSON.parse(raw) as Partial<BugReportDraft>;
-    const validCategories = new Set<BugReportCategory>(['bug', 'ui', 'ai-invoice', 'enhancement']);
+    const validCategories = new Set<BugReportCategory>([
+      'bug',
+      'ui',
+      'ai-invoice',
+      'enhancement',
+      'other',
+    ]);
     if (parsed.category && validCategories.has(parsed.category)) {
       category.value = parsed.category;
     }
@@ -232,6 +344,7 @@ function resetModalStateForOpen() {
   submitErrorMessage.value = '';
   isAuthExpired.value = false;
   submittedIssueNumber.value = null;
+  diagnosticsPreviewTick.value += 1;
 
   restoreDraftFromStorage();
 }
@@ -393,7 +506,8 @@ async function handleSubmit() {
       category: category.value,
       title: title.value.trim(),
       description: description.value.trim(),
-      diagnostics: includeDiagnostics.value ? diagnosticsSnapshot.value : null,
+      // 於送出當下即時組裝診斷資訊，確保回報時間精準對應點擊送出的本地時刻
+      diagnostics: includeDiagnostics.value ? buildDiagnosticsPayload() : null,
     };
 
     const response = await fetch('/api/report-bug', {
@@ -480,7 +594,7 @@ onMounted(() => {
       <header class="flex items-center justify-between bg-teal-700 px-4 py-3.5 text-white shrink-0">
         <div class="flex items-center gap-2">
           <span aria-hidden="true">🐛</span>
-          <h2 id="bug-report-dialog-title" class="text-base font-bold">錯誤回報</h2>
+          <h2 id="bug-report-dialog-title" class="text-base font-bold">問題與錯誤回報</h2>
         </div>
         <button
           type="button"
@@ -535,7 +649,7 @@ onMounted(() => {
         class="flex-1 overflow-y-auto p-4 space-y-5"
         @submit.prevent="handleSubmit"
       >
-        <!-- 1. 問題類型（4 個選項採語意化 radio 卡片群組） -->
+        <!-- 1. 問題類型（5 個選項採語意化 radio 卡片群組） -->
         <fieldset class="space-y-2">
           <legend class="text-xs font-bold text-slate-700">
             問題類型 <span aria-hidden="true" class="text-rose-600">*</span>
@@ -545,6 +659,7 @@ onMounted(() => {
               v-for="opt in CATEGORY_OPTIONS"
               :key="opt.value"
               class="relative block cursor-pointer"
+              :class="{ 'col-span-2': opt.fullWidth }"
             >
               <input
                 v-model="category"
@@ -676,6 +791,18 @@ onMounted(() => {
                 <dd class="font-mono text-slate-700 text-right">{{ diagnosticsSnapshot.appVersion }}</dd>
               </div>
               <div class="flex justify-between gap-2">
+                <dt class="text-slate-400 shrink-0">回報時間</dt>
+                <dd class="font-mono text-slate-700 text-right">
+                  {{ diagnosticsSnapshot.reportedAt }}（送出時更新）
+                </dd>
+              </div>
+              <div class="flex justify-between gap-2">
+                <dt class="text-slate-400 shrink-0">裝置與瀏覽器</dt>
+                <dd class="font-mono text-slate-700 text-right">
+                  {{ diagnosticsSnapshot.browserSummary }}
+                </dd>
+              </div>
+              <div class="flex justify-between gap-2">
                 <dt class="text-slate-400 shrink-0">顯示模式</dt>
                 <dd class="font-mono text-slate-700 text-right">{{ diagnosticsSnapshot.displayMode }}</dd>
               </div>
@@ -694,7 +821,7 @@ onMounted(() => {
                 </dd>
               </div>
               <div class="pt-1 border-t border-slate-100">
-                <dt class="text-slate-400">User-Agent</dt>
+                <dt class="text-slate-400">完整 User-Agent（備註）</dt>
                 <dd class="mt-0.5 font-mono text-[10px] text-slate-600 break-all">
                   {{ diagnosticsSnapshot.userAgent }}
                 </dd>
