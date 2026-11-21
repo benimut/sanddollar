@@ -4,11 +4,14 @@ import { createApp } from 'vue';
 import ReportView from '@/components/ReportView.vue';
 import {
   calculateFinancialSummary,
+  calculateSummaryPercentages,
+  formatSummaryPercentage,
   generateCategoryPieData,
+  generateDetailPieData,
   generateStackedBarData,
-  // @ts-ignore - extractAvailableMonths 尚未自 @/utils/report 匯出或實作 (TDD 紅燈階段)
   extractAvailableMonths,
 } from '@/utils/report';
+import * as db from '@/db';
 import type { ExpenseRecord, IncomeRecord, MonthlyReward } from '@/types';
 import * as dateUtils from '@/utils/date';
 
@@ -939,6 +942,268 @@ describe('統計報表數據轉換核心模組 (report utility)', () => {
       expect(result).toEqual(['2025-05', '2025-06', '2025-07']);
     });
   });
+
+  // ==========================================
+  // 5. 財務摘要百分比計算與格式化
+  // ==========================================
+  describe('calculateSummaryPercentages & formatSummaryPercentage - 摘要百分比計算', () => {
+    it('有總進帳且盈餘時，應以總進帳為 100% 基準計算各項百分比並格式化至小數點後 1 位', () => {
+      const rates = calculateSummaryPercentages({
+        totalIncome: 50000,
+        totalExpense: 12500,
+        balance: 37500,
+      });
+
+      expect(rates.expenseRate).toBeCloseTo(25, 5);
+      expect(rates.incomeRate).toBe(100);
+      expect(rates.balanceRate).toBeCloseTo(75, 5);
+
+      expect(formatSummaryPercentage(rates.expenseRate)).toBe('25.0%');
+      expect(formatSummaryPercentage(rates.incomeRate)).toBe('100.0%');
+      expect(formatSummaryPercentage(rates.balanceRate)).toBe('75.0%');
+    });
+
+    it('超支（赤字）時，支出百分比應超過 100%，當期結餘百分比應為負值', () => {
+      const rates = calculateSummaryPercentages({
+        totalIncome: 40000,
+        totalExpense: 50000,
+        balance: -10000,
+      });
+
+      expect(formatSummaryPercentage(rates.expenseRate)).toBe('125.0%');
+      expect(formatSummaryPercentage(rates.incomeRate)).toBe('100.0%');
+      expect(formatSummaryPercentage(rates.balanceRate)).toBe('-25.0%');
+    });
+
+    it('無進帳（totalIncome <= 0）時，各項比率應回傳 null 並格式化為「—」', () => {
+      const rates = calculateSummaryPercentages({
+        totalIncome: 0,
+        totalExpense: 3200,
+        balance: -3200,
+      });
+
+      expect(rates).toEqual({
+        expenseRate: null,
+        incomeRate: null,
+        balanceRate: null,
+      });
+      expect(formatSummaryPercentage(rates.expenseRate)).toBe('—');
+      expect(formatSummaryPercentage(rates.incomeRate)).toBe('—');
+      expect(formatSummaryPercentage(rates.balanceRate)).toBe('—');
+    });
+
+    it('極小負數四捨五入至小數點後 1 位時，應正規化為 0.0% 而非 -0.0%', () => {
+      expect(formatSummaryPercentage(-0.01)).toBe('0.0%');
+    });
+  });
+
+  // ==========================================
+  // 6. 分類圓餅圖月份篩選與細項圓餅圖（前 5 大 + 其他）
+  // ==========================================
+  describe('generateCategoryPieData (targetMonth) & generateDetailPieData', () => {
+    const sampleExpenses: ExpenseRecord[] = [
+      {
+        id: 1,
+        date: '2026-11-02',
+        merchant: '全家便利商店',
+        paymentMethod: '現金',
+        totalAmount: 195,
+        isForeign: false,
+        items: [
+          {
+            id: 'i1',
+            type: 'item',
+            name: '美式咖啡',
+            quantity: 1,
+            unitPrice: 120,
+            subtotal: 120,
+            category: '餐飲',
+          },
+          {
+            id: 'i2',
+            type: 'item',
+            name: '飯糰',
+            quantity: 1,
+            unitPrice: 80,
+            subtotal: 80,
+            category: '餐飲',
+          },
+          {
+            id: 'd1',
+            type: 'discount',
+            name: '自備杯折抵',
+            quantity: 1,
+            unitPrice: -5,
+            subtotal: -5,
+            category: '餐飲',
+          },
+        ],
+        createdAt: 1,
+        updatedAt: 1,
+      },
+      {
+        id: 2,
+        date: '2026-11-05',
+        merchant: '全聯',
+        paymentMethod: '信用卡',
+        totalAmount: 2700,
+        isForeign: false,
+        items: [
+          {
+            id: 'i3',
+            type: 'item',
+            name: '鮮奶',
+            quantity: 1,
+            unitPrice: 200,
+            subtotal: 200,
+            category: '日用品',
+          },
+          {
+            id: 'i4',
+            type: 'item',
+            name: '洗衣精',
+            quantity: 1,
+            unitPrice: 350,
+            subtotal: 350,
+            category: '日用品',
+          },
+          {
+            id: 'i5',
+            type: 'item',
+            name: '牛排',
+            quantity: 1,
+            unitPrice: 900,
+            subtotal: 900,
+            category: '餐飲',
+          },
+          {
+            id: 'i6',
+            type: 'item',
+            name: '水果禮盒',
+            quantity: 1,
+            unitPrice: 1250,
+            subtotal: 1250,
+            category: '送禮',
+          },
+        ],
+        createdAt: 2,
+        updatedAt: 2,
+      },
+      {
+        id: 3,
+        date: '2026-11-10',
+        merchant: '高鐵',
+        paymentMethod: '信用卡',
+        totalAmount: 1490,
+        isForeign: false,
+        items: [
+          {
+            id: 'i7',
+            type: 'item',
+            name: '高鐵車票',
+            quantity: 1,
+            unitPrice: 1490,
+            subtotal: 1490,
+            category: '交通',
+          },
+        ],
+        createdAt: 3,
+        updatedAt: 3,
+      },
+      {
+        id: 4,
+        date: '2026-10-20',
+        merchant: '十月商店',
+        paymentMethod: '現金',
+        totalAmount: 9999,
+        isForeign: false,
+        items: [
+          {
+            id: 'i8',
+            type: 'item',
+            name: '十月大筆消費',
+            quantity: 1,
+            unitPrice: 9999,
+            subtotal: 9999,
+            category: '其他',
+          },
+        ],
+        createdAt: 4,
+        updatedAt: 4,
+      },
+    ];
+
+    it('generateCategoryPieData 傳入 targetMonth 時，應僅統計該月份分類', () => {
+      const novPie = generateCategoryPieData(sampleExpenses, [], 'expense', '2026-11');
+      expect(novPie.labels).toContain('餐飲');
+      expect(novPie.labels).toContain('交通');
+      expect(novPie.labels).not.toContain('其他');
+    });
+
+    it('generateDetailPieData 支出模式：依每筆正向商品明細作圖，標籤格式為「名稱 (商家 日期)」，超過 5 筆保留前 5 大其餘加總為「其他」', () => {
+      // 2026-11 共有 7 個正向品項：1490, 1250, 900, 350, 200, 120, 80（折扣 -5 排除；10月 9999 排除）
+      const pie = generateDetailPieData(sampleExpenses, [], 'expense', {
+        targetMonth: '2026-11',
+        topN: 5,
+      });
+
+      expect(pie.labels).toEqual([
+        '高鐵車票 (高鐵 11/10)',
+        '水果禮盒 (全聯 11/05)',
+        '牛排 (全聯 11/05)',
+        '洗衣精 (全聯 11/05)',
+        '鮮奶 (全聯 11/05)',
+        '其他',
+      ]);
+      // 前 5 大：1490, 1250, 900, 350, 200；其餘：120 + 80 = 200
+      expect(pie.datasets[0].data).toEqual([1490, 1250, 900, 350, 200, 200]);
+      expect(pie.datasets[0].backgroundColor).toHaveLength(6);
+    });
+
+    it('generateDetailPieData 項目數 <= 5 時應全部保留且不產生「其他」切片', () => {
+      const onlyFirstExpense = [sampleExpenses[0]];
+      const pie = generateDetailPieData(onlyFirstExpense, [], 'expense', {
+        targetMonth: '2026-11',
+        topN: 5,
+      });
+
+      expect(pie.labels).toEqual([
+        '美式咖啡 (全家便利商店 11/02)',
+        '飯糰 (全家便利商店 11/02)',
+      ]);
+      expect(pie.datasets[0].data).toEqual([120, 80]);
+      expect(pie.labels).not.toContain('其他');
+    });
+
+    it('generateDetailPieData 收入模式：依每筆收入作圖，超過 5 筆保留前 5 大其餘加總為「其他」', () => {
+      const sampleIncomes: IncomeRecord[] = [
+        { date: '2026-11-05', source: '正職薪資', category: '薪資', amount: 50000, isForeign: false, createdAt: 1, updatedAt: 1 },
+        { date: '2026-11-08', source: '接案 A', category: '兼職', amount: 12000, isForeign: false, createdAt: 2, updatedAt: 2 },
+        { date: '2026-11-12', source: '股利發放', category: '投資', amount: 8000, isForeign: false, createdAt: 3, updatedAt: 3 },
+        { date: '2026-11-15', source: '講師費', category: '兼職', amount: 6000, isForeign: false, createdAt: 4, updatedAt: 4 },
+        { date: '2026-11-18', source: '二手拍賣', category: '其他', amount: 2500, isForeign: false, createdAt: 5, updatedAt: 5 },
+        { date: '2026-11-20', source: '朋友分帳', category: '轉帳', amount: 900, isForeign: false, createdAt: 6, updatedAt: 6 },
+        { date: '2026-11-22', source: '銀行利息', category: '投資', amount: 300, isForeign: false, createdAt: 7, updatedAt: 7 },
+        { date: '2026-10-05', source: '十月薪資', category: '薪資', amount: 99000, isForeign: false, createdAt: 8, updatedAt: 8 },
+      ];
+
+      const pie = generateDetailPieData([], sampleIncomes, 'income', {
+        targetMonth: '2026-11',
+        topN: 5,
+      });
+
+      expect(pie.labels).toEqual([
+        '正職薪資 (11/05)',
+        '接案 A (11/08)',
+        '股利發放 (11/12)',
+        '講師費 (11/15)',
+        '二手拍賣 (11/18)',
+        '其他',
+      ]);
+      // 其餘：900 + 300 = 1200
+      expect(pie.datasets[0].data).toEqual([50000, 12000, 8000, 6000, 2500, 1200]);
+    });
+  });
 });
 
 // ==========================================
@@ -1187,6 +1452,131 @@ describe('ReportView.vue - 報表元件圖表動態渲染與假 SVG 排除驗證
       } finally {
         shiftMonthSpy.mockRestore();
         vi.useRealTimers();
+      }
+    });
+  });
+
+  describe('摘要金額/百分比切換與圓餅圖細項前 5 大整合驗證', () => {
+    it('財務核心摘要可切換「百分比 / 金額」，無進帳月份顯示「—」，有進帳月份以總進帳為 100% 基準計算', async () => {
+      const { container, cleanup } = mountReportView();
+      await flushAsyncWork();
+
+      try {
+        const percentBtn = Array.from(container.querySelectorAll<HTMLButtonElement>('button')).find(
+          (b) => b.textContent?.trim() === '百分比'
+        );
+        const amountBtn = Array.from(container.querySelectorAll<HTMLButtonElement>('button')).find(
+          (b) => b.textContent?.trim() === '金額'
+        );
+        const monthSelect = container.querySelector<HTMLSelectElement>('#summary-month-select');
+
+        expect(percentBtn).toBeDefined();
+        expect(amountBtn).toBeDefined();
+        expect(monthSelect).not.toBeNull();
+
+        // 1. 預設當月無資料時切為百分比 -> 三欄應顯示「—」
+        percentBtn!.click();
+        await flushAsyncWork();
+
+        expect(container.querySelector('[data-testid="summary-expense-card"]')?.textContent).toContain('—');
+        expect(container.querySelector('[data-testid="summary-income-card"]')?.textContent).toContain('—');
+        expect(container.querySelector('[data-testid="summary-balance-card"]')?.textContent).toContain('—');
+
+        // 2. 切換月份至有資料的 2024-11（總進帳 50500、總支出 1200、結餘 49300）
+        monthSelect!.value = '2024-11';
+        monthSelect!.dispatchEvent(new Event('change'));
+        await flushAsyncWork();
+
+        // 1200 / 50500 = 2.4%、50500 / 50500 = 100.0%、49300 / 50500 = 97.6%
+        expect(container.querySelector('[data-testid="summary-expense-card"]')?.textContent).toContain('2.4%');
+        expect(container.querySelector('[data-testid="summary-income-card"]')?.textContent).toContain('100.0%');
+        expect(container.querySelector('[data-testid="summary-balance-card"]')?.textContent).toContain('97.6%');
+
+        // 3. 切回金額模式 -> 顯示 NT$ 金額
+        amountBtn!.click();
+        await flushAsyncWork();
+
+        expect(container.querySelector('[data-testid="summary-expense-card"]')?.textContent).toContain('NT$ 1200');
+        expect(container.querySelector('[data-testid="summary-income-card"]')?.textContent).toContain('NT$ 50500');
+        expect(container.querySelector('[data-testid="summary-balance-card"]')?.textContent).toContain('NT$ 49300');
+      } finally {
+        cleanup();
+      }
+    });
+
+    it('圓餅圖連動選取月份，切換至「細項」時以每筆商品明細作圖並僅保留前 5 大其餘加總為「其他」', async () => {
+      const sixItemsExpense: ExpenseRecord[] = [
+        {
+          id: 101,
+          date: '2024-11-08',
+          merchant: '超市',
+          paymentMethod: '現金',
+          totalAmount: 2100,
+          isForeign: false,
+          items: [
+            { id: '1', type: 'item', name: '品項A', quantity: 1, unitPrice: 600, subtotal: 600, category: '餐飲' },
+            { id: '2', type: 'item', name: '品項B', quantity: 1, unitPrice: 500, subtotal: 500, category: '餐飲' },
+            { id: '3', type: 'item', name: '品項C', quantity: 1, unitPrice: 400, subtotal: 400, category: '餐飲' },
+            { id: '4', type: 'item', name: '品項D', quantity: 1, unitPrice: 300, subtotal: 300, category: '日用品' },
+            { id: '5', type: 'item', name: '品項E', quantity: 1, unitPrice: 200, subtotal: 200, category: '日用品' },
+            { id: '6', type: 'item', name: '品項F', quantity: 1, unitPrice: 60, subtotal: 60, category: '日用品' },
+            { id: '7', type: 'item', name: '品項G', quantity: 1, unitPrice: 40, subtotal: 40, category: '日用品' },
+          ],
+          createdAt: 1,
+          updatedAt: 1,
+        },
+      ];
+      vi.mocked(db.getExpenses).mockResolvedValueOnce(sixItemsExpense);
+
+      const { container, cleanup } = mountReportView();
+      await flushAsyncWork();
+
+      try {
+        // 切換月份至 2024-11，驗證圓餅圖同步顯示該月分類資料
+        const monthSelect = container.querySelector<HTMLSelectElement>('#summary-month-select')!;
+        monthSelect.value = '2024-11';
+        monthSelect.dispatchEvent(new Event('change'));
+        await flushAsyncWork();
+
+        expect(container.querySelector('[data-testid="pie-month-badge"]')?.textContent?.trim()).toBe('2024-11');
+
+        const categoryPie = mockChartInstances.filter((inst) => inst.config?.type === 'pie').pop();
+        expect(categoryPie.config.data.labels).toEqual(['餐飲', '日用品']);
+
+        // 點擊「細項」按鈕切換至細項模式
+        const detailBtn = Array.from(container.querySelectorAll<HTMLButtonElement>('button')).find(
+          (b) => b.textContent?.trim() === '細項'
+        );
+        expect(detailBtn).toBeDefined();
+        detailBtn!.click();
+        await flushAsyncWork();
+
+        expect(categoryPie.destroy).toHaveBeenCalled();
+
+        const detailPie = mockChartInstances.filter((inst) => inst.config?.type === 'pie').pop();
+        expect(detailPie.config.data.labels).toEqual([
+          '品項A (超市 11/08)',
+          '品項B (超市 11/08)',
+          '品項C (超市 11/08)',
+          '品項D (超市 11/08)',
+          '品項E (超市 11/08)',
+          '其他',
+        ]);
+        expect(detailPie.config.data.datasets[0].data).toEqual([600, 500, 400, 300, 200, 100]);
+
+        // 切換至「收入細項」
+        const incomeDetailBtn = Array.from(container.querySelectorAll<HTMLButtonElement>('button')).find(
+          (b) => b.textContent?.trim() === '收入細項'
+        );
+        expect(incomeDetailBtn).toBeDefined();
+        incomeDetailBtn!.click();
+        await flushAsyncWork();
+
+        const incomeDetailPie = mockChartInstances.filter((inst) => inst.config?.type === 'pie').pop();
+        expect(incomeDetailPie.config.data.labels).toEqual(['11月薪水 (11/05)']);
+        expect(incomeDetailPie.config.data.datasets[0].data).toEqual([50000]);
+      } finally {
+        cleanup();
       }
     });
   });
