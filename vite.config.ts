@@ -3,7 +3,7 @@ import vue from '@vitejs/plugin-vue';
 import { VitePWA } from 'vite-plugin-pwa';
 import path from 'path';
 
-const basePath = process.env.GITHUB_ACTIONS ? '/sanddollar/' : '/';
+const basePath = process.env.VITE_BASE_PATH || '/';
 
 // https://vitejs.dev/config/
 export default defineConfig({
@@ -13,6 +13,10 @@ export default defineConfig({
     VitePWA({
       registerType: 'autoUpdate',
       includeAssets: ['favicon.png', 'apple-touch-icon.png', 'pwa-192x192.png', 'pwa-512x512.png'],
+      workbox: {
+        // 排除後端 API 與 Cloudflare Access 驗證端點，避免 Service Worker 攔截登入或辨識請求
+        navigateFallbackDenylist: [/^\/api\//, /^\/cdn-cgi\//],
+      },
       manifest: {
         name: 'Sand Dollar 記帳本',
         short_name: 'Sand Dollar',

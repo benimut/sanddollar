@@ -209,10 +209,12 @@ const foreignExpenseAmount = ref<number | ''>('');
 const netTwdAmount = ref<number | ''>('');
 const feeAmountInput = ref<number | ''>('');
 
-// 電子發票資訊
+// 電子發票／紙本發票掃描資訊
 const invoiceNumber = ref('');
 const invoiceRandomCode = ref('');
 const isScannerOpen = ref(false);
+/** 發票匯入後之非阻擋核對提醒訊息（例如紙本未辨識日期、折扣上限調整或未歸類提醒） */
+const invoiceImportNotices = ref<string[]>([]);
 
 /**
  * 歷史商品快取資料型別介面
@@ -712,29 +714,138 @@ function removeDiscount(index: number) {
 }
 
 /**
- * 接收發票 QR Code 解析結果並帶入欄位
- * 分類比照手動新增品項規則：有預設支出分類時自動帶入，無分類時安全留空並於儲存時檢查。
+ * 接收電子發票 QR Code 或紙本發票 AI 辨識結果並帶入欄位
+ * - 店家名稱：僅帶入照片實際辨識文字（不自動對應常用店家）。
+ * - 商品分類：優先套用存在於現有支出分類清單之對應分類，否則比照手動新增品項規則 fallback。
+ * - 折扣匯入：嚴格遵循現有折扣約束（無有效商品分類不匯入、空白名稱保留給使用者填寫、
+ *   無明確分類比照 addDiscount 預設帶入首個有效商品分類、並以 clampDiscountsToCategoryLimits 檢核上限）。
  */
 function handleInvoiceParsed(result: ParsedInvoiceResult) {
   clearValidationError();
-  expenseDate.value = result.date;
-  invoiceNumber.value = result.invoiceNumber;
-  invoiceRandomCode.value = result.randomCode;
+  invoiceImportNotices.value = [];
+
+  if (result.date && result.date.trim()) {
+    expenseDate.value = result.date.trim();
+  } else if (result.source === 'paper') {
+    invoiceImportNotices.value.push('紙本發票未辨識出確切開立日期，已保留目前表單日期，請手動確認。');
+  }
+
+  if (result.merchant && result.merchant.trim()) {
+    merchant.value = result.merchant.trim();
+  }
+
+  invoiceNumber.value = result.invoiceNumber || '';
+  invoiceRandomCode.value = result.randomCode || '';
+
+  const fallbackCategory =
+    defaultExpenseCategory.value || expenseCategoryList.value[0] || '';
 
   if (result.items && result.items.length > 0) {
-    const fallbackCategory =
-      defaultExpenseCategory.value || expenseCategoryList.value[0] || '';
     items.value = result.items.map((it, idx) => {
-      const incomingCategory =
-        it.category && it.category !== '未分類' ? it.category : '';
+      const candidateCategory =
+        it.category && it.category !== '未分類' ? it.category.trim() : '';
+      const validCategory =
+        candidateCategory && expenseCategoryList.value.includes(candidateCategory)
+          ? candidateCategory
+          : '';
       return {
         id: `invoice-item-${idx}-${Date.now()}`,
         name: it.name,
         quantity: it.quantity,
         unitPrice: it.unitPrice,
-        category: incomingCategory || fallbackCategory,
+        category: validCategory || fallbackCategory,
       };
     });
+  } else if (result.source === 'paper' && result.totalAmount > 0) {
+    items.value = [
+      {
+        id: `invoice-item-0-${Date.now()}`,
+        name: '',
+        quantity: 1,
+        unitPrice: result.totalAmount,
+        category: fallbackCategory,
+      },
+    ];
+    invoiceImportNotices.value.push('發票未辨識出細項品名，已先帶入總計金額，請補填商品品名。');
+  }
+
+  // 先重置既有折扣，再依最新商品分類與小計上限套用發票辨識折扣
+  discounts.value = [];
+  const rawDiscounts = Array.isArray(result.discounts) ? result.discounts : [];
+  const normalizedIncomingDiscounts = rawDiscounts
+    .map((d) => {
+      const rawAmt = Number(d.amount);
+      const absAmt = Number.isFinite(rawAmt) ? Math.abs(Math.round(rawAmt)) : 0;
+      return {
+        // 若照片未印出名稱，刻意保留空白交由使用者自行輸入
+        name: typeof d.name === 'string' ? d.name.trim() : '',
+        amount: absAmt,
+        category: typeof d.category === 'string' ? d.category.trim() : '',
+      };
+    })
+    .filter((d) => d.amount > 0);
+
+  if (normalizedIncomingDiscounts.length === 0) {
+    return;
+  }
+
+  const availableCats = availableDiscountCategories.value;
+  if (availableCats.length === 0) {
+    const summary = normalizedIncomingDiscounts
+      .map((d) => `${d.name || '未命名折扣'} NT$${d.amount}`)
+      .join('、');
+    invoiceImportNotices.value.push(
+      `發票辨識出折抵項目（${summary}），因目前尚無含有效分類之商品，依規則未自動匯入；請先選擇商品分類後再手動新增。`
+    );
+    return;
+  }
+
+  const defaultDiscCategory = availableCats[0];
+  let hasFallbackAssignedOnMultiCategory = false;
+
+  const stagedDiscounts: Array<{ form: FormDiscount; originalAmount: number }> =
+    normalizedIncomingDiscounts.map((d, dIdx) => {
+      const matchedCategory = availableCats.includes(d.category) ? d.category : '';
+      if (!matchedCategory && availableCats.length > 1) {
+        hasFallbackAssignedOnMultiCategory = true;
+      }
+      return {
+        form: {
+          id: `invoice-disc-${dIdx}-${Date.now()}`,
+          name: d.name,
+          amount: d.amount,
+          category: matchedCategory || defaultDiscCategory,
+        },
+        originalAmount: d.amount,
+      };
+    });
+
+  discounts.value = stagedDiscounts.map((entry) => entry.form);
+  clampDiscountsToCategoryLimits();
+
+  const keptDiscounts: FormDiscount[] = [];
+  for (const entry of stagedDiscounts) {
+    const adjustedAmount = entry.form.amount;
+    const label = entry.form.name || '未命名折扣';
+    if (adjustedAmount <= 0) {
+      invoiceImportNotices.value.push(
+        `折抵「${label}」(原 NT$${entry.originalAmount}) 超過分類「${entry.form.category}」剩餘可折額度而未匯入，請手動核對或拆至其他分類。`
+      );
+      continue;
+    }
+    if (adjustedAmount < entry.originalAmount) {
+      invoiceImportNotices.value.push(
+        `折抵「${label}」超過分類「${entry.form.category}」上限，已自 NT$${entry.originalAmount} 調整為 NT$${adjustedAmount}，請核對或手動拆至其他分類。`
+      );
+    }
+    keptDiscounts.push(entry.form);
+  }
+  discounts.value = keptDiscounts;
+
+  if (hasFallbackAssignedOnMultiCategory && keptDiscounts.length > 0) {
+    invoiceImportNotices.value.push(
+      `此發票含多項商品分類，未明確指定歸屬之折抵已預設套用「${defaultDiscCategory}」，儲存前請確認折扣分類。`
+    );
   }
 }
 
@@ -787,6 +898,7 @@ function resetForm() {
   feeAmountInput.value = '';
   invoiceNumber.value = '';
   invoiceRandomCode.value = '';
+  invoiceImportNotices.value = [];
   showAddCategory.value = false;
   newCategoryName.value = '';
   categoryTargetItemIndex.value = null;
@@ -1043,7 +1155,9 @@ async function handleSaveExpense() {
       id="expense-invoice-number"
       class="text-xs text-teal-700 bg-teal-50 px-3 py-1.5 rounded-lg flex items-center justify-between"
     >
-      <span>發票號碼：{{ invoiceNumber }} (隨機碼：{{ invoiceRandomCode }})</span>
+      <span>
+        發票號碼：{{ invoiceNumber }}<template v-if="invoiceRandomCode"> (隨機碼：{{ invoiceRandomCode }})</template>
+      </span>
       <button
         type="button"
         class="text-slate-400 hover:text-slate-600 ml-2"
@@ -1051,6 +1165,28 @@ async function handleSaveExpense() {
       >
         ✕
       </button>
+    </div>
+
+    <!-- 發票匯入核對提醒區（例如紙本未辨識日期、折扣上限調整或歸屬核對） -->
+    <div
+      v-if="invoiceImportNotices.length > 0"
+      data-testid="invoice-import-notices"
+      class="text-xs text-amber-800 bg-amber-50 border border-amber-200 px-3 py-2 rounded-lg space-y-1"
+    >
+      <div class="flex items-start justify-between gap-2">
+        <span class="font-semibold">發票匯入提醒（請核對後再儲存）：</span>
+        <button
+          type="button"
+          class="text-amber-500 hover:text-amber-700 shrink-0"
+          aria-label="關閉提醒"
+          @click="invoiceImportNotices = []"
+        >
+          ✕
+        </button>
+      </div>
+      <ul class="list-disc pl-4 space-y-0.5 text-[11px] leading-relaxed">
+        <li v-for="(notice, nIdx) in invoiceImportNotices" :key="nIdx">{{ notice }}</li>
+      </ul>
     </div>
 
     <!-- 消費日期與店家輸入 (含 [選擇] 按鈕) -->
@@ -1502,6 +1638,7 @@ async function handleSaveExpense() {
     <!-- 發票掃描彈窗 -->
     <InvoiceScannerModal
       v-if="isScannerOpen"
+      :categories="expenseCategoryList"
       @close="isScannerOpen = false"
       @parsed="handleInvoiceParsed"
     />

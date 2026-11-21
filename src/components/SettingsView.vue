@@ -12,8 +12,17 @@
  * 6. 危險操作區域：支援清空全庫資料 (clearAllDatabaseData)，具備嚴謹二次防呆警示機制。
  */
 
-import { ref, computed, onMounted } from 'vue';
+import { ref, computed, onMounted, onUnmounted } from 'vue';
 import SettingsItemManager from './SettingsItemManager.vue';
+import {
+  AI_INVOICE_MODELS,
+  AI_MEDIA_RESOLUTION_OPTIONS,
+  AI_THINKING_LEVEL_OPTIONS,
+  getSupportedThinkingLevels,
+  loadAiInvoiceSettings,
+  saveAiInvoiceSettings,
+  type AiInvoiceSettings,
+} from '@/utils/aiInvoiceSettings';
 import {
   getCategories,
   addCategory,
@@ -478,6 +487,122 @@ async function handleConfirmClearStep2() {
   }
 }
 
+// ==================== 4.5 紙本發票 AI 辨識設定 ====================
+/** 紙本發票 AI 辨識偏好（模型、思考層級、圖片解析度） */
+const aiSettings = ref<AiInvoiceSettings>(loadAiInvoiceSettings());
+/** AI 設定自動儲存回饋訊息 */
+const aiSettingsSavedNotice = ref('');
+/** AI 設定自動儲存回饋計時器 */
+let aiSettingsNoticeTimer: ReturnType<typeof setTimeout> | null = null;
+
+/** 目前選用模型的中繼資訊 */
+const selectedAiModelOption = computed(() => {
+  return (
+    AI_INVOICE_MODELS.find((opt) => opt.id === aiSettings.value.model) || AI_INVOICE_MODELS[0]
+  );
+});
+
+/** 依目前選定模型動態過濾出的合法思考層級清單 */
+const availableThinkingLevels = computed(() => {
+  const supported = new Set(getSupportedThinkingLevels(aiSettings.value.model));
+  return AI_THINKING_LEVEL_OPTIONS.filter((opt) => supported.has(opt.value));
+});
+
+/** 目前選用思考層級說明 */
+const selectedThinkingOption = computed(() => {
+  return (
+    availableThinkingLevels.value.find((opt) => opt.value === aiSettings.value.thinkingLevel) ||
+    availableThinkingLevels.value[0]
+  );
+});
+
+/** 目前選用圖片解析度說明 */
+const selectedResolutionOption = computed(() => {
+  return (
+    AI_MEDIA_RESOLUTION_OPTIONS.find((opt) => opt.value === aiSettings.value.mediaResolution) ||
+    AI_MEDIA_RESOLUTION_OPTIONS[1]
+  );
+});
+
+/**
+ * 顯示 AI 設定已自動儲存提示並於 2 秒後清除
+ */
+function showAiSavedFeedback() {
+  aiSettingsSavedNotice.value = '已自動儲存';
+  if (aiSettingsNoticeTimer) {
+    clearTimeout(aiSettingsNoticeTimer);
+  }
+  aiSettingsNoticeTimer = setTimeout(() => {
+    aiSettingsSavedNotice.value = '';
+    aiSettingsNoticeTimer = null;
+  }, 2000);
+}
+
+/**
+ * 切換 AI 模型時自動正規化合法思考層級並立即儲存至 localStorage
+ */
+function handleAiModelChange() {
+  aiSettings.value = saveAiInvoiceSettings(aiSettings.value);
+  showAiSavedFeedback();
+}
+
+/**
+ * 變更思考層級或圖片解析度時立即儲存至 localStorage
+ */
+function handleAiSettingsChange() {
+  aiSettings.value = saveAiInvoiceSettings(aiSettings.value);
+  showAiSavedFeedback();
+}
+
+/** 是否正在檢查 Cloudflare 授權登入狀態 */
+const isCheckingLogout = ref(false);
+/** Cloudflare 登出操作提示訊息 */
+const cloudflareLogoutMessage = ref('');
+
+/**
+ * 動態檢查目前是否已通過 Cloudflare Access 授權；若已授權則導向動態登出端點（不影響本機記帳資料）
+ */
+async function handleCloudflareLogout() {
+  if (isCheckingLogout.value) return;
+  cloudflareLogoutMessage.value = '';
+
+  if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+    cloudflareLogoutMessage.value = '目前處於離線狀態，無法聯絡 Cloudflare 登出服務。';
+    return;
+  }
+
+  isCheckingLogout.value = true;
+  try {
+    const response = await fetch('/api/auth?check=1', {
+      method: 'GET',
+      credentials: 'same-origin',
+      redirect: 'manual',
+      cache: 'no-store',
+    });
+
+    const contentType = response.headers.get('content-type') || '';
+    if (
+      response.type === 'opaqueredirect' ||
+      response.redirected ||
+      response.status === 401 ||
+      response.status === 403 ||
+      (response.status >= 300 && response.status < 400) ||
+      !contentType.toLowerCase().includes('application/json') ||
+      !response.ok
+    ) {
+      cloudflareLogoutMessage.value = '目前此裝置尚未授權登入 Cloudflare，無需登出。';
+      return;
+    }
+
+    const returnTo = `${window.location.pathname}${window.location.search}` || '/';
+    window.location.assign(`/api/auth?logout=1&returnTo=${encodeURIComponent(returnTo)}`);
+  } catch {
+    cloudflareLogoutMessage.value = '目前此裝置尚未授權登入 Cloudflare，無需登出。';
+  } finally {
+    isCheckingLogout.value = false;
+  }
+}
+
 // ==================== 資料初始化 ====================
 async function loadAllData() {
   await Promise.all([
@@ -491,6 +616,13 @@ async function loadAllData() {
 
 onMounted(() => {
   loadAllData();
+});
+
+onUnmounted(() => {
+  if (aiSettingsNoticeTimer) {
+    clearTimeout(aiSettingsNoticeTimer);
+    aiSettingsNoticeTimer = null;
+  }
 });
 </script>
 
@@ -689,6 +821,127 @@ onMounted(() => {
       @delete="handleDeleteRewardSource"
       @set-default="handleSetDefaultRewardSource"
     />
+
+    <!-- 4.5 紙本發票 AI 辨識設定 -->
+    <section
+      data-testid="ai-invoice-settings-section"
+      class="bg-white rounded-2xl p-4 shadow-sm border border-slate-100 space-y-3.5"
+    >
+      <div class="flex items-start justify-between gap-2">
+        <div class="flex items-center gap-2">
+          <span class="text-base">🤖</span>
+          <div>
+            <h3 class="text-sm font-bold text-slate-700">紙本發票 AI 辨識設定</h3>
+            <p class="text-xs text-slate-500">
+              調整 Gemini 模型、思考層級與圖片解析度以平衡速度與準確率（變更立即套用）
+            </p>
+          </div>
+        </div>
+        <span
+          v-if="aiSettingsSavedNotice"
+          data-testid="ai-settings-saved-notice"
+          class="text-[11px] font-semibold text-teal-600 shrink-0"
+        >
+          ✓ {{ aiSettingsSavedNotice }}
+        </span>
+      </div>
+
+      <div class="space-y-3 pt-1">
+        <!-- 模型選擇 -->
+        <div class="space-y-1">
+          <label
+            for="ai-invoice-model-select"
+            class="block text-xs font-semibold text-slate-600"
+          >
+            AI 模型
+          </label>
+          <select
+            id="ai-invoice-model-select"
+            v-model="aiSettings.model"
+            class="w-full px-3 py-2 text-xs font-medium text-slate-700 bg-slate-50 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-teal-500 focus:border-teal-500"
+            @change="handleAiModelChange"
+          >
+            <option v-for="opt in AI_INVOICE_MODELS" :key="opt.id" :value="opt.id">
+              {{ opt.label }}
+            </option>
+          </select>
+          <p class="text-[11px] text-slate-500 leading-relaxed">
+            {{ selectedAiModelOption.description }}
+          </p>
+        </div>
+
+        <!-- 思考層級選擇 -->
+        <div class="space-y-1">
+          <label
+            for="ai-invoice-thinking-select"
+            class="block text-xs font-semibold text-slate-600"
+          >
+            思考層級（Thinking Level）
+          </label>
+          <select
+            id="ai-invoice-thinking-select"
+            v-model="aiSettings.thinkingLevel"
+            class="w-full px-3 py-2 text-xs font-medium text-slate-700 bg-slate-50 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-teal-500 focus:border-teal-500"
+            @change="handleAiSettingsChange"
+          >
+            <option v-for="opt in availableThinkingLevels" :key="opt.value" :value="opt.value">
+              {{ opt.label }}
+            </option>
+          </select>
+          <p class="text-[11px] text-slate-500 leading-relaxed">
+            {{ selectedThinkingOption?.description }}
+          </p>
+        </div>
+
+        <!-- 圖片解析度選擇 -->
+        <div class="space-y-1">
+          <label
+            for="ai-invoice-resolution-select"
+            class="block text-xs font-semibold text-slate-600"
+          >
+            圖片輸入解析度（Media Resolution）
+          </label>
+          <select
+            id="ai-invoice-resolution-select"
+            v-model="aiSettings.mediaResolution"
+            class="w-full px-3 py-2 text-xs font-medium text-slate-700 bg-slate-50 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-teal-500 focus:border-teal-500"
+            @change="handleAiSettingsChange"
+          >
+            <option v-for="opt in AI_MEDIA_RESOLUTION_OPTIONS" :key="opt.value" :value="opt.value">
+              {{ opt.label }}
+            </option>
+          </select>
+          <p class="text-[11px] text-slate-500 leading-relaxed">
+            {{ selectedResolutionOption?.description }}
+          </p>
+        </div>
+      </div>
+
+      <!-- Cloudflare Access 授權管理（僅清除授權 Cookie，不動本機記帳資料） -->
+      <div class="pt-3 border-t border-slate-100 space-y-2">
+        <div class="flex items-center justify-between gap-2">
+          <p class="text-[11px] text-slate-500 leading-relaxed">
+            登出僅清除 Cloudflare AI 授權 Cookie，不會影響本機記帳與設定資料。
+          </p>
+          <button
+            id="btn-cloudflare-logout"
+            type="button"
+            :disabled="isCheckingLogout"
+            class="px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 font-semibold text-xs rounded-xl transition-colors shrink-0 disabled:opacity-50"
+            @click="handleCloudflareLogout"
+          >
+            {{ isCheckingLogout ? '檢查授權狀態中...' : '登出 Cloudflare 授權' }}
+          </button>
+        </div>
+        <p
+          v-if="cloudflareLogoutMessage"
+          data-testid="cloudflare-logout-message"
+          class="text-[11px] text-slate-600 font-medium"
+        >
+          {{ cloudflareLogoutMessage }}
+        </p>
+      </div>
+    </section>
 
     <!-- 5. 本地資料備份與還原 -->
     <section class="bg-white rounded-2xl p-4 shadow-sm border border-slate-100 space-y-4">
