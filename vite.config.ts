@@ -18,9 +18,9 @@ export default defineConfig({
         navigateFallbackDenylist: [/^\/api\//, /^\/cdn-cgi\//],
       },
       manifest: {
-        name: 'Sand Dollar 記帳本',
+        name: 'Sand Dollar',
         short_name: 'Sand Dollar',
-        description: '手機記帳本單頁應用程式 (PWA)，支援雙 QR Code 發票掃描與海外換算',
+        description: '手機記帳應用程式 (PWA)，支援發票掃描、回饋登記與海外消費',
         theme_color: '#0d9488',
         background_color: '#ffffff',
         display: 'standalone',
