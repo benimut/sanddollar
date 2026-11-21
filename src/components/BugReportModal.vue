@@ -15,6 +15,11 @@
 
 import { ref, computed, watch, onMounted, nextTick } from 'vue';
 import { loadAiInvoiceSettings } from '@/utils/aiInvoiceSettings';
+import {
+  classifyCloudflareJsonResponse,
+  isBrowserOffline,
+  CLOUDFLARE_NETWORK_ERROR_MESSAGE,
+} from '@/utils/cloudflareApi';
 
 /** 支援之錯誤回報問題類型 */
 export type BugReportCategory = 'bug' | 'ui' | 'ai-invoice' | 'enhancement' | 'other';
@@ -495,7 +500,7 @@ async function handleSubmit() {
     return;
   }
 
-  if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+  if (isBrowserOffline()) {
     submitErrorMessage.value = '目前處於離線狀態，無法送出錯誤回報。';
     return;
   }
@@ -520,17 +525,13 @@ async function handleSubmit() {
       body: JSON.stringify(payload),
     });
 
-    const contentType = response.headers.get('content-type') || '';
+    const classified = await classifyCloudflareJsonResponse<{
+      issueNumber?: unknown;
+      error?: string;
+    }>(response);
 
     // 若遭遇 Cloudflare Access 未登入或驗證過期，暫存草稿並引導重新認證
-    if (
-      response.type === 'opaqueredirect' ||
-      response.redirected ||
-      response.status === 401 ||
-      response.status === 403 ||
-      (response.status >= 300 && response.status < 400) ||
-      !contentType.toLowerCase().includes('application/json')
-    ) {
+    if (classified.kind === 'auth_required') {
       saveDraftToStorage();
       isAuthExpired.value = true;
       submitErrorMessage.value =
@@ -538,18 +539,20 @@ async function handleSubmit() {
       return;
     }
 
-    const data = (await response.json()) as { issueNumber?: unknown; error?: string };
+    if (classified.kind !== 'ok') {
+      submitErrorMessage.value = classified.message;
+      return;
+    }
 
-    if (!response.ok || typeof data.issueNumber !== 'number') {
-      submitErrorMessage.value =
-        data.error || `錯誤回報送出失敗（狀態碼 ${response.status}），請稍後再試。`;
+    if (typeof classified.data.issueNumber !== 'number') {
+      submitErrorMessage.value = '伺服器回應格式異常，請稍後再試。';
       return;
     }
 
     clearDraftStorage();
-    submittedIssueNumber.value = data.issueNumber;
+    submittedIssueNumber.value = classified.data.issueNumber;
   } catch {
-    submitErrorMessage.value = '網路連線異常，無法送出錯誤回報，請稍後再試。';
+    submitErrorMessage.value = CLOUDFLARE_NETWORK_ERROR_MESSAGE;
   } finally {
     isSubmitting.value = false;
   }
