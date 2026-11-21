@@ -12,8 +12,9 @@
  * 6. 危險操作區域：支援清空全庫資料 (clearAllDatabaseData)，具備嚴謹二次防呆警示機制。
  */
 
-import { ref, computed, onMounted, onUnmounted } from 'vue';
+import { ref, computed, watch, onMounted, onUnmounted } from 'vue';
 import SettingsItemManager from './SettingsItemManager.vue';
+import BugReportModal from './BugReportModal.vue';
 import {
   AI_INVOICE_MODELS,
   AI_MEDIA_RESOLUTION_OPTIONS,
@@ -603,6 +604,101 @@ async function handleCloudflareLogout() {
   }
 }
 
+// ==================== 5.5 問題與錯誤回報 ====================
+const props = withDefaults(
+  defineProps<{
+    /** 認證導回後是否自動觸發開啟錯誤回報流程 */
+    autoOpenBugReport?: boolean;
+  }>(),
+  {
+    autoOpenBugReport: false,
+  }
+);
+
+const emit = defineEmits<{
+  (e: 'bug-report-handled'): void;
+}>();
+
+/** 是否正在檢查 Cloudflare Access 授權狀態 */
+const isCheckingBugReportAuth = ref(false);
+/** 是否因尚未登入 Cloudflare Access 需引導使用者前往認證 */
+const bugReportNeedsAuth = ref(false);
+/** 錯誤回報區塊之離線或異常狀態訊息 */
+const bugReportStatusMessage = ref('');
+/** 是否開啟錯誤回報彈出表單 */
+const isBugReportModalOpen = ref(false);
+
+/**
+ * 點擊「填寫回報表單」時先檢核離線與 Cloudflare Access 授權狀態，通過後再開啟表單
+ */
+async function handleOpenBugReport() {
+  if (isCheckingBugReportAuth.value) return;
+  bugReportStatusMessage.value = '';
+  bugReportNeedsAuth.value = false;
+
+  if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+    bugReportStatusMessage.value = '目前處於離線狀態，無法傳送錯誤回報。';
+    return;
+  }
+
+  isCheckingBugReportAuth.value = true;
+  try {
+    const response = await fetch('/api/auth?check=1', {
+      method: 'GET',
+      credentials: 'same-origin',
+      redirect: 'manual',
+      cache: 'no-store',
+    });
+
+    const contentType = response.headers.get('content-type') || '';
+    if (
+      response.type === 'opaqueredirect' ||
+      response.redirected ||
+      response.status === 401 ||
+      response.status === 403 ||
+      (response.status >= 300 && response.status < 400) ||
+      !contentType.toLowerCase().includes('application/json')
+    ) {
+      bugReportNeedsAuth.value = true;
+      return;
+    }
+
+    if (response.ok) {
+      isBugReportModalOpen.value = true;
+      return;
+    }
+
+    bugReportNeedsAuth.value = true;
+  } catch {
+    // 跨網域 Access 登入重導向在部分瀏覽器會以 TypeError 呈現，視為尚未完成認證
+    bugReportNeedsAuth.value = true;
+  } finally {
+    isCheckingBugReportAuth.value = false;
+  }
+}
+
+/**
+ * 導向 Cloudflare Access 完成認證，並於完成後自動返回設定頁開啟錯誤回報表單
+ */
+function handleStartBugReportAuth() {
+  const params = new URLSearchParams(window.location.search);
+  params.set('tab', 'settings');
+  params.set('reportBug', '1');
+  const returnTo = `${window.location.pathname}?${params.toString()}`;
+  window.location.assign(`/api/auth?returnTo=${encodeURIComponent(returnTo)}`);
+}
+
+/**
+ * 消耗認證導回後自動開啟錯誤回報之意圖（避免重複觸發）
+ */
+function consumeAutoOpenBugReport() {
+  if (!props.autoOpenBugReport || isCheckingBugReportAuth.value || isBugReportModalOpen.value) {
+    return;
+  }
+  emit('bug-report-handled');
+  void handleOpenBugReport();
+}
+
 // ==================== 資料初始化 ====================
 async function loadAllData() {
   await Promise.all([
@@ -614,8 +710,20 @@ async function loadAllData() {
   ]);
 }
 
+watch(
+  () => props.autoOpenBugReport,
+  (shouldOpen) => {
+    if (shouldOpen) {
+      consumeAutoOpenBugReport();
+    }
+  }
+);
+
 onMounted(() => {
   loadAllData();
+  if (props.autoOpenBugReport) {
+    consumeAutoOpenBugReport();
+  }
 });
 
 onUnmounted(() => {
@@ -997,6 +1105,64 @@ onUnmounted(() => {
       </div>
     </section>
 
+    <!-- 5.5 問題與錯誤回報 -->
+    <section
+      data-testid="bug-report-section"
+      class="bg-white rounded-2xl p-4 shadow-sm border border-slate-100 space-y-3"
+    >
+      <div class="flex items-center gap-2">
+        <span class="text-base">🐛</span>
+        <div>
+          <h3 class="text-sm font-bold text-slate-700">問題與錯誤回報</h3>
+          <p class="text-xs text-slate-500">
+            遇到異常狀況或有功能建議？可直接填寫回報表單送出追蹤
+          </p>
+        </div>
+      </div>
+
+      <button
+        id="btn-open-bug-report"
+        type="button"
+        :disabled="isCheckingBugReportAuth"
+        class="w-full py-2.5 px-3 bg-teal-600 hover:bg-teal-700 text-white font-bold text-xs rounded-xl shadow-xs transition-colors flex items-center justify-center gap-1.5 disabled:opacity-60"
+        @click="handleOpenBugReport"
+      >
+        <span>📝</span>
+        <span>{{ isCheckingBugReportAuth ? '檢查授權狀態中...' : '填寫回報表單' }}</span>
+      </button>
+
+      <!-- 離線或異常狀態提示 -->
+      <div
+        v-if="bugReportStatusMessage"
+        data-testid="bug-report-status-message"
+        class="p-3 rounded-xl text-xs font-medium bg-rose-50 text-rose-700 border border-rose-200"
+      >
+        {{ bugReportStatusMessage }}
+      </div>
+
+      <!-- 前置 Cloudflare Access 認證引導卡片 -->
+      <div
+        v-if="bugReportNeedsAuth"
+        data-testid="bug-report-auth-prompt"
+        class="p-3.5 bg-teal-50 border border-teal-200 rounded-xl space-y-2.5 text-center"
+      >
+        <p class="text-xs font-semibold text-teal-900">
+          送出錯誤回報前需先完成 Cloudflare 認證
+        </p>
+        <p class="text-[11px] text-teal-700 leading-relaxed">
+          登入驗證完成後將自動導回此頁面並開啟表單，確保系統不受垃圾訊息干擾。
+        </p>
+        <button
+          id="btn-bug-report-auth"
+          type="button"
+          class="w-full py-2.5 px-4 bg-teal-600 hover:bg-teal-700 text-white font-bold text-xs rounded-xl shadow-xs transition-colors"
+          @click="handleStartBugReportAuth"
+        >
+          前往 Cloudflare 認證
+        </button>
+      </div>
+    </section>
+
     <!-- 6. 危險區域：清除所有資料 (二次同意) -->
     <section class="bg-rose-50/40 rounded-2xl p-4 border border-rose-100 space-y-3">
       <div class="flex items-center gap-2 text-rose-700">
@@ -1088,5 +1254,11 @@ onUnmounted(() => {
         <span>{{ clearSuccessMessage }}</span>
       </div>
     </section>
+
+    <!-- 錯誤回報彈出表單 -->
+    <BugReportModal
+      :is-open="isBugReportModalOpen"
+      @close="isBugReportModalOpen = false"
+    />
   </div>
 </template>

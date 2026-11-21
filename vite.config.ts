@@ -1,13 +1,33 @@
 import { defineConfig } from 'vite';
 import vue from '@vitejs/plugin-vue';
 import { VitePWA } from 'vite-plugin-pwa';
+import fs from 'node:fs';
 import path from 'path';
 
 const basePath = process.env.VITE_BASE_PATH || '/';
 
+/** 由 package.json 安全讀取建置期應用程式版本號 */
+function readPackageVersion(): string {
+  try {
+    const raw = fs.readFileSync(path.resolve(__dirname, './package.json'), 'utf-8');
+    const parsed = JSON.parse(raw) as { version?: unknown };
+    if (typeof parsed.version === 'string' && parsed.version.trim()) {
+      return parsed.version.trim();
+    }
+  } catch {
+    // 讀取失敗時退回預設版本字串
+  }
+  return '1.0.0';
+}
+
+const appVersion = readPackageVersion();
+
 // https://vitejs.dev/config/
 export default defineConfig({
   base: basePath,
+  define: {
+    'import.meta.env.VITE_APP_VERSION': JSON.stringify(appVersion),
+  },
   plugins: [
     vue(),
     VitePWA({

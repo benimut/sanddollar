@@ -7,6 +7,7 @@
  * 2. 以原生 fetch() 直呼 Gemini Interactions REST API（v1beta + Api-Revision: 2026-05-20），移除龐大 SDK 相依以消除冷啟動。
  * 3. 依據前端設定頁選擇（模型、thinking_level、resolution）經白名單與相容性檢核後呼叫模型並回傳結構化 JSON 與效能遙測。
  * 4. 提供 GET /api/auth 檢查／完成 Cloudflare Access 認證；非 /api/* 路徑委派予 Workers Static Assets 託管 Vue SPA。
+ * 5. 提供 POST /api/report-bug 端點，驗證錯誤回報請求並透過 GitHub REST API 自動建立 Issue。
  */
 
 /** Cloudflare Worker 環境綁定與 Secret 介面 */
@@ -15,6 +16,12 @@ interface Env {
   ASSETS: Fetcher;
   /** 透過 Cloudflare Worker Secret 注入之 Gemini API 金鑰 */
   GEMINI_API_KEY?: string;
+  /** 透過 Cloudflare Worker Secret 注入之 GitHub Fine-grained PAT（僅需 Issues 讀寫權限） */
+  GITHUB_TOKEN?: string;
+  /** 目標 GitHub 倉庫擁有者（預設為 benimut） */
+  GITHUB_OWNER?: string;
+  /** 目標 GitHub 倉庫名稱（預設為 sanddollar） */
+  GITHUB_REPO?: string;
 }
 
 /** 支援之圖片 MIME 類型白名單 */
@@ -1111,6 +1118,368 @@ function handleAuthEndpoint(request: Request, url: URL): Response {
   });
 }
 
+// ==================== 錯誤回報自動建立 GitHub Issue ====================
+
+/** 錯誤回報請求本文最大位元組數（16 KB，防範無界請求緩衝耗盡記憶體） */
+const MAX_BUG_REPORT_BYTES = 16 * 1024;
+/** 錯誤回報標題最大字元數 */
+const MAX_BUG_TITLE_LENGTH = 120;
+/** 錯誤回報詳細說明最大字元數 */
+const MAX_BUG_DESCRIPTION_LENGTH = 4000;
+/** GitHub REST API 版本標頭 */
+const GITHUB_API_VERSION = '2022-11-28';
+
+/** 支援之錯誤回報問題類型白名單 */
+type BugReportCategory = 'bug' | 'ui' | 'ai-invoice' | 'enhancement';
+
+/** 各問題類型對應之 Issue 標題前綴與 GitHub Labels */
+const BUG_REPORT_CATEGORY_CONFIG: Record<
+  BugReportCategory,
+  { prefix: string; labels: readonly string[] }
+> = {
+  bug: { prefix: '功能異常', labels: ['bug', 'user-report'] },
+  ui: { prefix: '畫面顯示', labels: ['bug', 'ui', 'user-report'] },
+  'ai-invoice': { prefix: 'AI 發票辨識', labels: ['bug', 'ai-invoice', 'user-report'] },
+  enhancement: { prefix: '功能建議', labels: ['enhancement', 'user-report'] },
+};
+
+/** 清洗後之可選環境診斷資訊結構 */
+interface SanitizedBugDiagnostics {
+  appVersion?: string;
+  reportedAt?: string;
+  userAgent?: string;
+  viewport?: string;
+  displayMode?: string;
+  language?: string;
+  aiSettings?: string;
+}
+
+/** 驗證後之錯誤回報請求內容 */
+interface ExtractedBugReportRequest {
+  category: BugReportCategory;
+  title: string;
+  description: string;
+  diagnostics: SanitizedBugDiagnostics | null;
+}
+
+/**
+ * 將字串清洗為單行文字：移除換行與控制字元並依上限截斷
+ */
+function sanitizeSingleLine(raw: unknown, maxLen: number): string {
+  if (typeof raw !== 'string') return '';
+  return raw
+    .replace(/[\r\n]+/g, ' ')
+    .replace(/[\u0000-\u001f\u007f]/g, '')
+    .trim()
+    .slice(0, maxLen);
+}
+
+/**
+ * 清洗來自前端之裝置與環境診斷資訊（白名單過濾與欄位截斷）
+ */
+function sanitizeDiagnostics(raw: unknown): SanitizedBugDiagnostics | null {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    return null;
+  }
+
+  const obj = raw as Record<string, unknown>;
+  const cleaned: SanitizedBugDiagnostics = {};
+
+  const appVersion = sanitizeSingleLine(obj.appVersion, 40);
+  if (appVersion) cleaned.appVersion = appVersion;
+
+  const reportedAt = sanitizeSingleLine(obj.reportedAt, 64);
+  if (reportedAt) cleaned.reportedAt = reportedAt;
+
+  const userAgent = sanitizeSingleLine(obj.userAgent, 300);
+  if (userAgent) cleaned.userAgent = userAgent;
+
+  const viewport = sanitizeSingleLine(obj.viewport, 60);
+  if (viewport) cleaned.viewport = viewport;
+
+  const displayMode = sanitizeSingleLine(obj.displayMode, 40);
+  if (displayMode) cleaned.displayMode = displayMode;
+
+  const language = sanitizeSingleLine(obj.language, 32);
+  if (language) cleaned.language = language;
+
+  const aiSettings = sanitizeSingleLine(obj.aiSettings, 160);
+  if (aiSettings) cleaned.aiSettings = aiSettings;
+
+  return Object.keys(cleaned).length > 0 ? cleaned : null;
+}
+
+/**
+ * 解析並嚴格驗證 POST /api/report-bug 的 JSON 請求內容
+ */
+async function extractBugReportRequest(
+  request: Request
+): Promise<{ ok: true; data: ExtractedBugReportRequest } | { ok: false; response: Response }> {
+  const contentType = (request.headers.get('content-type') || '').toLowerCase();
+  if (!contentType.includes('application/json')) {
+    return {
+      ok: false,
+      response: jsonResponse({ error: '請求格式必須為 application/json' }, 415),
+    };
+  }
+
+  const contentLengthHeader = request.headers.get('content-length');
+  if (contentLengthHeader && Number(contentLengthHeader) > MAX_BUG_REPORT_BYTES) {
+    return {
+      ok: false,
+      response: jsonResponse({ error: '回報內容過大（上限 16 KB），請精簡說明後重試。' }, 413),
+    };
+  }
+
+  let rawText: string;
+  try {
+    rawText = await request.text();
+  } catch {
+    return { ok: false, response: jsonResponse({ error: '無法讀取請求內容' }, 400) };
+  }
+
+  const actualBytes = new TextEncoder().encode(rawText).byteLength;
+  if (actualBytes > MAX_BUG_REPORT_BYTES) {
+    return {
+      ok: false,
+      response: jsonResponse({ error: '回報內容過大（上限 16 KB），請精簡說明後重試。' }, 413),
+    };
+  }
+
+  let parsedBody: unknown;
+  try {
+    parsedBody = JSON.parse(rawText);
+  } catch {
+    return { ok: false, response: jsonResponse({ error: '無效的 JSON 請求格式' }, 400) };
+  }
+
+  if (!parsedBody || typeof parsedBody !== 'object' || Array.isArray(parsedBody)) {
+    return { ok: false, response: jsonResponse({ error: '無效的回報請求資料' }, 400) };
+  }
+
+  const body = parsedBody as Record<string, unknown>;
+  const categoryRaw = typeof body.category === 'string' ? body.category.trim() : '';
+  if (!(categoryRaw in BUG_REPORT_CATEGORY_CONFIG)) {
+    return { ok: false, response: jsonResponse({ error: '請選擇有效的問題類型' }, 400) };
+  }
+  const category = categoryRaw as BugReportCategory;
+
+  // 標題強制轉為單行並檢查去除空白後不可為空
+  const title = sanitizeSingleLine(body.title, MAX_BUG_TITLE_LENGTH);
+  if (!title) {
+    return { ok: false, response: jsonResponse({ error: '請填寫問題標題' }, 400) };
+  }
+
+  // 詳細說明保留換行結構，但移除除 \n/\t 外的控制字元
+  const rawDescription = typeof body.description === 'string' ? body.description : '';
+  const description = rawDescription
+    .replace(/\r\n?/g, '\n')
+    .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, '')
+    .trim()
+    .slice(0, MAX_BUG_DESCRIPTION_LENGTH);
+
+  if (!description) {
+    return {
+      ok: false,
+      response: jsonResponse({ error: '請填寫詳細說明或重現步驟' }, 400),
+    };
+  }
+
+  return {
+    ok: true,
+    data: {
+      category,
+      title,
+      description,
+      diagnostics: sanitizeDiagnostics(body.diagnostics),
+    },
+  };
+}
+
+/**
+ * 跳脫 Markdown 表格儲存格內的管線符號、反引號與換行，避免破壞表格版面
+ */
+function escapeMarkdownCell(value: string): string {
+  return value.replace(/[\r\n]+/g, ' ').replace(/\|/g, '\\|').replace(/`/g, '\\`');
+}
+
+/**
+ * 組裝送往 GitHub Issues REST API 的繁體中文 Markdown 內文
+ */
+function buildGitHubIssueBody(data: ExtractedBugReportRequest): string {
+  const categoryLabel = BUG_REPORT_CATEGORY_CONFIG[data.category].prefix;
+  const sections: string[] = [
+    '## 問題分類',
+    categoryLabel,
+    '',
+    '## 詳細說明與重現步驟',
+    data.description,
+  ];
+
+  if (data.diagnostics) {
+    const diagRows: Array<[string, string | undefined]> = [
+      ['App 版本', data.diagnostics.appVersion],
+      ['回報時間', data.diagnostics.reportedAt],
+      ['PWA 顯示模式', data.diagnostics.displayMode],
+      ['螢幕／視窗尺寸', data.diagnostics.viewport],
+      ['系統語系', data.diagnostics.language],
+      ['AI 發票設定', data.diagnostics.aiSettings],
+      ['瀏覽器 User-Agent', data.diagnostics.userAgent],
+    ];
+
+    const populatedRows = diagRows.filter(([, val]) => Boolean(val));
+    if (populatedRows.length > 0) {
+      sections.push('', '## 裝置與環境診斷資訊', '| 項目 | 數值 |', '| :--- | :--- |');
+      for (const [label, val] of populatedRows) {
+        sections.push(`| ${label} | ${escapeMarkdownCell(val as string)} |`);
+      }
+    }
+  }
+
+  sections.push('', '---', '*由 Sand Dollar 設定頁錯誤回報表單自動建立*');
+  return sections.join('\n');
+}
+
+/**
+ * 安全解析 GitHub API 錯誤訊息，並遮罩任何潛在 Token 格式以防洩漏
+ */
+function extractSafeGitHubError(
+  status: number | undefined,
+  bodyText: string
+): { status?: number; summary: string } {
+  let detail = '';
+
+  if (bodyText.trim()) {
+    try {
+      const parsed = JSON.parse(bodyText) as {
+        message?: unknown;
+        errors?: Array<{ message?: unknown; code?: unknown; field?: unknown }>;
+      };
+      if (typeof parsed.message === 'string' && parsed.message.trim()) {
+        detail = parsed.message.trim();
+      }
+      if (Array.isArray(parsed.errors) && parsed.errors.length > 0) {
+        const firstErr = parsed.errors[0];
+        const errPart =
+          typeof firstErr?.message === 'string'
+            ? firstErr.message
+            : typeof firstErr?.code === 'string'
+              ? `${firstErr.field ? `${String(firstErr.field)}: ` : ''}${firstErr.code}`
+              : '';
+        if (errPart) {
+          detail = detail ? `${detail} (${errPart})` : errPart;
+        }
+      }
+    } catch {
+      detail = bodyText.trim();
+    }
+  }
+
+  // 防禦性遮罩 GitHub Token 字樣（Classic PAT 與 Fine-grained PAT）
+  const sanitized = detail
+    .replace(/(?:gh[pousr]_[A-Za-z0-9_]+|github_pat_[A-Za-z0-9_]+)/g, '[REDACTED]')
+    .slice(0, 240);
+
+  return { status, summary: sanitized || 'GitHub API 回應異常' };
+}
+
+/**
+ * 處理錯誤回報並自動建立 GitHub Issue (POST /api/report-bug)
+ */
+async function handleReportBug(request: Request, env: Env): Promise<Response> {
+  if (request.method !== 'POST') {
+    return jsonResponse({ error: '僅支援 POST 請求' }, 405);
+  }
+
+  const githubToken = typeof env.GITHUB_TOKEN === 'string' ? env.GITHUB_TOKEN.trim() : '';
+  if (!githubToken) {
+    return jsonResponse(
+      { error: '伺服器尚未設定 GITHUB_TOKEN，請先於 Cloudflare Worker Secrets 完成設定。' },
+      503
+    );
+  }
+
+  const owner = (typeof env.GITHUB_OWNER === 'string' ? env.GITHUB_OWNER.trim() : '') || 'benimut';
+  const repo = (typeof env.GITHUB_REPO === 'string' ? env.GITHUB_REPO.trim() : '') || 'sanddollar';
+  if (!/^[A-Za-z0-9._-]+$/.test(owner) || !/^[A-Za-z0-9._-]+$/.test(repo)) {
+    console.error(JSON.stringify({ event: 'report-bug-invalid-repo-config', owner, repo }));
+    return jsonResponse({ error: '伺服器 GitHub 倉庫設定格式錯誤，請檢查環境變數。' }, 500);
+  }
+
+  const extracted = await extractBugReportRequest(request);
+  if (!extracted.ok) {
+    return extracted.response;
+  }
+
+  const config = BUG_REPORT_CATEGORY_CONFIG[extracted.data.category];
+  const issueTitle = `[${config.prefix}] ${extracted.data.title}`;
+  const issueBody = buildGitHubIssueBody(extracted.data);
+  const endpoint = `https://api.github.com/repos/${owner}/${repo}/issues`;
+
+  const requestHeaders = {
+    Accept: 'application/vnd.github+json',
+    Authorization: `Bearer ${githubToken}`,
+    'X-GitHub-Api-Version': GITHUB_API_VERSION,
+    'User-Agent': 'sanddollar-worker',
+    'Content-Type': 'application/json; charset=utf-8',
+  };
+
+  try {
+    let githubResponse = await fetch(endpoint, {
+      method: 'POST',
+      headers: requestHeaders,
+      body: JSON.stringify({
+        title: issueTitle,
+        body: issueBody,
+        labels: config.labels,
+      }),
+    });
+
+    // 若因標籤權限或欄位驗證被拒（422），降級不帶 labels 重試一次以確保回報不遺失
+    if (githubResponse.status === 422) {
+      const firstErrText = await githubResponse.text().catch(() => '');
+      if (/label/i.test(firstErrText)) {
+        githubResponse = await fetch(endpoint, {
+          method: 'POST',
+          headers: requestHeaders,
+          body: JSON.stringify({
+            title: issueTitle,
+            body: issueBody,
+          }),
+        });
+      } else {
+        const { status, summary } = extractSafeGitHubError(githubResponse.status, firstErrText);
+        console.error(JSON.stringify({ event: 'report-bug-failed', status, summary }));
+        return jsonResponse({ error: `無法建立 GitHub Issue（HTTP 422）：${summary}` }, 502);
+      }
+    }
+
+    if (!githubResponse.ok) {
+      const errText = await githubResponse.text().catch(() => '');
+      const { status, summary } = extractSafeGitHubError(githubResponse.status, errText);
+      console.error(JSON.stringify({ event: 'report-bug-failed', status, summary }));
+      return jsonResponse(
+        { error: `無法建立 GitHub Issue（HTTP ${githubResponse.status}）：${summary}` },
+        502
+      );
+    }
+
+    const created = (await githubResponse.json()) as { number?: unknown };
+    if (typeof created.number !== 'number' || !Number.isFinite(created.number)) {
+      console.error(JSON.stringify({ event: 'report-bug-invalid-response' }));
+      return jsonResponse({ error: 'GitHub API 回傳格式異常，請稍後再試。' }, 502);
+    }
+
+    // 依需求僅回傳追蹤編號，不暴露外部 GitHub Issue URL
+    return jsonResponse({ issueNumber: created.number }, 201);
+  } catch (err: unknown) {
+    const rawMsg = err instanceof Error ? err.message : String(err || '連線異常');
+    const { summary } = extractSafeGitHubError(undefined, rawMsg);
+    console.error(JSON.stringify({ event: 'report-bug-network-error', summary }));
+    return jsonResponse({ error: `建立錯誤回報連線異常：${summary}` }, 502);
+  }
+}
+
 export default {
   /**
    * Cloudflare Worker 主 fetch 進入點
@@ -1124,6 +1493,10 @@ export default {
 
     if (url.pathname === '/api/parse-invoice') {
       return handleParseInvoice(request, env);
+    }
+
+    if (url.pathname === '/api/report-bug') {
+      return handleReportBug(request, env);
     }
 
     if (url.pathname.startsWith('/api/')) {
