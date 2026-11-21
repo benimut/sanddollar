@@ -4,6 +4,10 @@
   "main": "worker/index.ts",
   "compatibility_date": "2026-11-01",
   "compatibility_flags": ["nodejs_compat"],
+  "vars": {
+    "GITHUB_OWNER": "benimut",
+    "GITHUB_REPO": "sanddollar"
+  },
   "workers_dev": true,
   "preview_urls": true,
   "assets": {

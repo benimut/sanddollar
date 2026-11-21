@@ -9,18 +9,53 @@
  * 3. 響應式與無障礙支援：具備 role="navigation" 與 aria-selected 標記，提供流暢之行動端 PWA 使用體驗。
  */
 
-import { ref } from 'vue';
+import { ref, onMounted } from 'vue';
 import TransactionList from './components/TransactionList.vue';
 import TransactionForm from './components/TransactionForm.vue';
 import ReportView from './components/ReportView.vue';
 import SettingsView from './components/SettingsView.vue';
 import type { TransactionEditTarget } from './types';
 
+/** 由網址查詢參數讀取初始目標分頁與是否於認證後自動開啟錯誤回報 */
+function readInitialRouteIntent(): { openSettings: boolean; openBugReport: boolean } {
+  if (typeof window === 'undefined') {
+    return { openSettings: false, openBugReport: false };
+  }
+  const params = new URLSearchParams(window.location.search);
+  const openBugReport = params.get('reportBug') === '1';
+  const openSettings = openBugReport || params.get('tab') === 'settings';
+  return { openSettings, openBugReport };
+}
+
+const initialIntent = readInitialRouteIntent();
+
 /** 目前選取的分頁視圖：'list' 為明細、'transaction' 為記帳、'report' 為報表、'settings' 為設定 */
-const currentTab = ref<'list' | 'transaction' | 'report' | 'settings'>('transaction');
+const currentTab = ref<'list' | 'transaction' | 'report' | 'settings'>(
+  initialIntent.openSettings ? 'settings' : 'transaction'
+);
+
+/** 認證導回後是否自動開啟錯誤回報表單 */
+const autoOpenBugReport = ref(initialIntent.openBugReport);
 
 /** 當前正在編輯的記錄（若無則為 null 處於新增模式） */
 const editingTransaction = ref<TransactionEditTarget | null>(null);
+
+onMounted(() => {
+  if (typeof window === 'undefined' || !window.location.search) return;
+  const params = new URLSearchParams(window.location.search);
+  if (!params.has('tab') && !params.has('reportBug')) return;
+
+  // 立即清理網址參數，避免使用者重新整理頁面時重複切回設定頁或自動開啟彈窗
+  params.delete('tab');
+  params.delete('reportBug');
+  const nextQuery = params.toString();
+  const nextUrl = `${window.location.pathname}${nextQuery ? `?${nextQuery}` : ''}${window.location.hash || ''}`;
+  try {
+    window.history.replaceState(window.history.state, '', nextUrl);
+  } catch {
+    // 測試或受限環境下安全忽略
+  }
+});
 
 /**
  * 處理來自明細列表之編輯請求
@@ -68,7 +103,11 @@ function handleTransactionCancel() {
         @cancel="handleTransactionCancel"
       />
       <ReportView v-else-if="currentTab === 'report'" />
-      <SettingsView v-else-if="currentTab === 'settings'" />
+      <SettingsView
+        v-else-if="currentTab === 'settings'"
+        :auto-open-bug-report="autoOpenBugReport"
+        @bug-report-handled="autoOpenBugReport = false"
+      />
     </main>
 
     <!-- 底部導覽列 -->
