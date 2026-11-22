@@ -24,6 +24,8 @@ pnpm-debug.log*
 .env
 .env.*
 !.env.example
+.dev.vars
+.dev.vars.*
 
 # Editor directories and files
 .vscode/*
@@ -42,4 +44,3 @@ pnpm-debug.log*
 # Test reports and artifacts
 playwright-report/
 test-results/
-TODO.md
