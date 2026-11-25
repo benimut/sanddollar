@@ -48,11 +48,12 @@ test.describe('Sand Dollar 端對端核心業務流程 (E2E Workflow)', () => {
     const itemNameInput = page.locator('#expense-name');
     await itemNameInput.fill('美式咖啡');
 
-    const itemQtyInput = page.locator('#item-qty-0');
-    await itemQtyInput.fill('2');
-
     const itemPriceInput = page.locator('#expense-amount');
     await itemPriceInput.fill('35');
+
+    const itemQtyInput = page.locator('#item-qty-0');
+    await itemQtyInput.fill('2');
+    await itemQtyInput.blur();
 
     const itemCategorySelect = page.locator('#expense-category');
     if (await itemCategorySelect.isVisible()) {
@@ -78,6 +79,12 @@ test.describe('Sand Dollar 端對端核心業務流程 (E2E Workflow)', () => {
 
     const discountAmountInput = page.locator('#disc-amount-0');
     await discountAmountInput.fill('5');
+
+    // 若初始尚未建立任何支付方式，填入「現金」
+    const customPaymentInput = page.locator('#custom-payment-input');
+    if (await customPaymentInput.isVisible()) {
+      await customPaymentInput.fill('現金');
+    }
 
     // 驗證總額應為 2 * 35 - 5 = 65 元
     const totalAmountDisplay = page.getByText(/總額|總計|合計/i);
@@ -252,10 +259,11 @@ test.describe('Sand Dollar 端對端核心業務流程 (E2E Workflow)', () => {
     const foreignAmountInput = page.locator('#foreign-income-amount');
     await foreignAmountInput.fill('1000');
 
-    // 輸入台幣到帳金額 32000
+    // 輸入台幣到帳金額 32000 與手續費金額 0
     await amountInput.fill('32000');
+    await page.locator('#income-fee-amount').fill('0');
 
-    // 驗證預設手續費為 0 元
+    // 驗證折合台幣手續費為 0 元
     await expect(page.getByText(/折合台幣手續費：|手續費：/)).toBeVisible();
     await expect(page.getByText(/NT\$\s*0/)).toBeVisible();
 
@@ -268,12 +276,19 @@ test.describe('Sand Dollar 端對端核心業務流程 (E2E Workflow)', () => {
     await expect(page.getByText('海外接案').first()).toBeVisible();
   });
 
-  test('4. 報表檢視：驗證財務核心摘要（總進帳 82000、總支出、結餘）、圓餅圖切換與 0 軸堆疊長條圖', async () => {
+  test('4. 報表檢視：驗證財務核心摘要（預設百分比與切換金額 82000、總支出、結餘）、圓餅圖切換與 0 軸堆疊長條圖', async () => {
     // 切換至底部導航「報表 (Report)」頁籤
     const reportTab = page.getByRole('navigation').getByRole('tab', { name: /報表/i });
     await reportTab.click();
 
-    // 驗證財務摘要面板：
+    // 驗證財務摘要面板預設顯示百分比（3313 / 82000 = 4.0%、100.0%、78687 / 82000 = 96.0%）
+    await expect(page.getByTestId('summary-expense-card')).toContainText('4.0%');
+    await expect(page.getByTestId('summary-income-card')).toContainText('100.0%');
+    await expect(page.getByTestId('summary-balance-card')).toContainText('96.0%');
+
+    // 切換至「金額」模式驗證實際金額：
+    await page.getByRole('group', { name: '摘要顯示單位' }).getByRole('button', { name: '金額' }).click();
+
     // 總進帳 = 50000 + 32000 = 82000
     await expect(page.getByText(/總進帳/i)).toBeVisible();
     await expect(page.getByText(/82,?000/)).toBeVisible();
@@ -366,9 +381,15 @@ test.describe('Sand Dollar 端對端核心業務流程 (E2E Workflow)', () => {
       // 7. 重新載入頁面，驗證 IndexedDB 資料持久性與完整性
       await page.reload();
 
-      // 8. 切換至「報表」頁籤，驗證還原後數據依然完整
+      // 8. 切換至「報表」頁籤，驗證還原後預設顯示百分比且切換金額後數據依然完整
       const reportTab = page.getByRole('navigation').getByRole('tab', { name: /報表/i });
       await reportTab.click();
+
+      await expect(page.getByTestId('summary-expense-card')).toContainText('4.0%');
+      await expect(page.getByTestId('summary-income-card')).toContainText('100.0%');
+      await expect(page.getByTestId('summary-balance-card')).toContainText('96.0%');
+
+      await page.getByRole('group', { name: '摘要顯示單位' }).getByRole('button', { name: '金額' }).click();
 
       await expect(page.getByText(/總進帳/i)).toBeVisible();
       await expect(page.getByText(/82,?000/)).toBeVisible();
