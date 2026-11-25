@@ -4,7 +4,7 @@
  * @description 財務報表與視覺化圖表檢視元件
  *
  * 核心業務職責：
- * 1. 財務核心摘要卡片：呈現總進帳 (totalIncome)、總支出 (totalExpense) 與當期結餘 (balance)，支援金額與百分比（以總進帳為 100% 基準）即時切換。
+ * 1. 財務核心摘要卡片：呈現總進帳 (totalIncome)、總支出 (totalExpense) 與當期結餘 (balance)，支援百分比（預設，以總進帳為 100% 基準）與金額即時切換。
  * 2. 收支佔比圓餅圖：整合 Chart.js PieController，連動當月篩選，支援「分類 / 細項」與「支出 / 收入」切換；細項模式僅保留前 5 大並將其餘加總為「其他」。
  * 3. 每月收支堆疊長條圖：整合 Chart.js BarController 與 generateStackedBarData，呈現並排雙柱堆疊分析（收入/回饋 vs 支出）。
  * 4. 自訂起訖月份區間篩選：支援快選（近3個月、近6個月、近12個月、全部）與精確手動輸入起訖月份 (#report-start-month, #report-end-month)。
@@ -69,8 +69,8 @@ const defaultEndMonth = `${currentYear}-12`;
 // 財務摘要選取之月份（必填，預設為當前月份）
 const selectedMonth = ref<string>(currentMonth);
 
-// 財務摘要顯示單位：'amount' (金額) | 'percent' (百分比)
-const summaryDisplayMode = ref<'amount' | 'percent'>('amount');
+// 財務摘要顯示單位：'percent' (百分比，預設) | 'amount' (金額)
+const summaryDisplayMode = ref<'percent' | 'amount'>('percent');
 
 // 依當期財務摘要計算百分比（以總進帳為 100% 基準）
 const summaryPercentages = computed(() => calculateSummaryPercentages(summary.value));
@@ -420,25 +420,12 @@ onUnmounted(() => {
         <h2 class="text-base font-bold text-slate-800">財務核心摘要</h2>
 
         <div class="flex items-center gap-2">
-          <!-- 顯示單位切換：金額 / 百分比 -->
+          <!-- 顯示單位切換：百分比 / 金額（預設百分比） -->
           <div
             role="group"
             aria-label="摘要顯示單位"
             class="flex rounded-lg bg-slate-100 p-0.5 text-xs font-medium"
           >
-            <button
-              type="button"
-              :aria-pressed="summaryDisplayMode === 'amount'"
-              class="min-h-[28px] px-2.5 py-1 rounded-md transition-all focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-teal-600"
-              :class="
-                summaryDisplayMode === 'amount'
-                  ? 'bg-white text-teal-700 font-bold shadow-sm'
-                  : 'text-slate-500 hover:text-slate-800'
-              "
-              @click="summaryDisplayMode = 'amount'"
-            >
-              金額
-            </button>
             <button
               type="button"
               :aria-pressed="summaryDisplayMode === 'percent'"
@@ -451,6 +438,19 @@ onUnmounted(() => {
               @click="summaryDisplayMode = 'percent'"
             >
               百分比
+            </button>
+            <button
+              type="button"
+              :aria-pressed="summaryDisplayMode === 'amount'"
+              class="min-h-[28px] px-2.5 py-1 rounded-md transition-all focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-teal-600"
+              :class="
+                summaryDisplayMode === 'amount'
+                  ? 'bg-white text-teal-700 font-bold shadow-sm'
+                  : 'text-slate-500 hover:text-slate-800'
+              "
+              @click="summaryDisplayMode = 'amount'"
+            >
+              金額
             </button>
           </div>
 
