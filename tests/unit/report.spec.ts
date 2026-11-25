@@ -1456,31 +1456,31 @@ describe('ReportView.vue - 報表元件圖表動態渲染與假 SVG 排除驗證
     });
   });
 
-  describe('摘要金額/百分比切換與圓餅圖細項前 5 大整合驗證', () => {
-    it('財務核心摘要可切換「百分比 / 金額」，無進帳月份顯示「—」，有進帳月份以總進帳為 100% 基準計算', async () => {
+  describe('摘要百分比/金額切換與圓餅圖細項前 5 大整合驗證', () => {
+    it('財務核心摘要預設為「百分比」且可切換「百分比 / 金額」，無進帳月份顯示「—」，有進帳月份以總進帳為 100% 基準計算', async () => {
       const { container, cleanup } = mountReportView();
       await flushAsyncWork();
 
       try {
-        const percentBtn = Array.from(container.querySelectorAll<HTMLButtonElement>('button')).find(
-          (b) => b.textContent?.trim() === '百分比'
+        const unitGroupButtons = Array.from(
+          container.querySelectorAll<HTMLButtonElement>('[aria-label="摘要顯示單位"] button')
         );
-        const amountBtn = Array.from(container.querySelectorAll<HTMLButtonElement>('button')).find(
-          (b) => b.textContent?.trim() === '金額'
-        );
+        expect(unitGroupButtons.map((b) => b.textContent?.trim())).toEqual(['百分比', '金額']);
+
+        const [percentBtn, amountBtn] = unitGroupButtons;
         const monthSelect = container.querySelector<HTMLSelectElement>('#summary-month-select');
 
-        expect(percentBtn).toBeDefined();
-        expect(amountBtn).toBeDefined();
+        expect(percentBtn.getAttribute('aria-pressed')).toBe('true');
+        expect(amountBtn.getAttribute('aria-pressed')).toBe('false');
         expect(monthSelect).not.toBeNull();
 
-        // 1. 預設當月無資料時切為百分比 -> 三欄應顯示「—」
-        percentBtn!.click();
-        await flushAsyncWork();
-
+        // 1. 掛載後預設即為百分比模式，當月無資料時三欄應直接顯示「—」
         expect(container.querySelector('[data-testid="summary-expense-card"]')?.textContent).toContain('—');
         expect(container.querySelector('[data-testid="summary-income-card"]')?.textContent).toContain('—');
         expect(container.querySelector('[data-testid="summary-balance-card"]')?.textContent).toContain('—');
+        expect(container.querySelector('[data-testid="summary-percent-note"]')?.textContent).toContain(
+          '當月無進帳紀錄，無法計算百分比'
+        );
 
         // 2. 切換月份至有資料的 2024-11（總進帳 50500、總支出 1200、結餘 49300）
         monthSelect!.value = '2024-11';
@@ -1492,13 +1492,22 @@ describe('ReportView.vue - 報表元件圖表動態渲染與假 SVG 排除驗證
         expect(container.querySelector('[data-testid="summary-income-card"]')?.textContent).toContain('100.0%');
         expect(container.querySelector('[data-testid="summary-balance-card"]')?.textContent).toContain('97.6%');
 
-        // 3. 切回金額模式 -> 顯示 NT$ 金額
-        amountBtn!.click();
+        // 3. 點擊「金額」切換為金額模式 -> 顯示 NT$ 金額
+        amountBtn.click();
         await flushAsyncWork();
 
+        expect(amountBtn.getAttribute('aria-pressed')).toBe('true');
+        expect(percentBtn.getAttribute('aria-pressed')).toBe('false');
         expect(container.querySelector('[data-testid="summary-expense-card"]')?.textContent).toContain('NT$ 1200');
         expect(container.querySelector('[data-testid="summary-income-card"]')?.textContent).toContain('NT$ 50500');
         expect(container.querySelector('[data-testid="summary-balance-card"]')?.textContent).toContain('NT$ 49300');
+
+        // 4. 再點擊「百分比」可正常切回百分比模式
+        percentBtn.click();
+        await flushAsyncWork();
+
+        expect(percentBtn.getAttribute('aria-pressed')).toBe('true');
+        expect(container.querySelector('[data-testid="summary-expense-card"]')?.textContent).toContain('2.4%');
       } finally {
         cleanup();
       }
